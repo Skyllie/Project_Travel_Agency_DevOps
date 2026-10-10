@@ -47,6 +47,9 @@ public class HibernateConfig {
     @Value("${data.script}")
     private String DATA_SCRIPT;
 
+    @Value("${data.seed}")
+    private boolean DATA_SEED;
+
     @Bean
     public DataSource dataSource() {
         DriverManagerDataSource dataSource = new DriverManagerDataSource();
@@ -85,6 +88,7 @@ public class HibernateConfig {
         ResourceDatabasePopulator populator = new ResourceDatabasePopulator();
         populator.addScript(new ClassPathResource(DATA_SCRIPT));
         initializer.setDatabasePopulator(populator);
+        initializer.setEnabled(DATA_SEED);
 
         return initializer;
     }
