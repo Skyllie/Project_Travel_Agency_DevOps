@@ -1,0 +1,14 @@
+- name: Base setup for all VMs
+  hosts: all
+  roles:
+    - common
+
+- name: Database VM
+  hosts: db
+  roles:
+    - mysql
+
+- name: Application VM
+  hosts: app
+  roles:
+    - tomcat

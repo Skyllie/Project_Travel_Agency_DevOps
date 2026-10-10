@@ -1,0 +1,8 @@
+# Database shared by the app and db roles
+travel_db_name: travelagency
+travel_db_user: travel
+travel_db_password: "{{ vault_travel_db_password }}"
+
+# Addresses come from the inventory, so changing an IP there is enough
+travel_db_host: "{{ hostvars[groups['db'][0]]['ansible_host'] }}"
+travel_app_host: "{{ hostvars[groups['app'][0]]['ansible_host'] }}"

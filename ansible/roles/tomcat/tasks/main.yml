@@ -1,0 +1,141 @@
+- name: Check that the WAR exists on the control node
+  ansible.builtin.stat:
+    path: "{{ tomcat_war_path }}"
+  delegate_to: localhost
+  become: false
+  register: tomcat_war
+
+- name: Stop if the WAR is missing
+  ansible.builtin.assert:
+    that: tomcat_war.stat.exists
+    fail_msg: "{{ tomcat_war_path }} not found. Run 'mvn -B clean package -DskipTests' in the project root first."
+
+- name: Install Java 17
+  ansible.builtin.dnf:
+    name: java-17-openjdk-headless
+    state: present
+
+- name: Create tomcat group
+  ansible.builtin.group:
+    name: "{{ tomcat_user }}"
+    system: true
+
+- name: Create tomcat user
+  ansible.builtin.user:
+    name: "{{ tomcat_user }}"
+    group: "{{ tomcat_user }}"
+    home: "{{ tomcat_home }}"
+    create_home: false
+    shell: /sbin/nologin
+    system: true
+
+- name: Download Tomcat and verify its checksum
+  ansible.builtin.get_url:
+    url: "{{ tomcat_url }}"
+    dest: "/var/cache/apache-tomcat-{{ tomcat_version }}.tar.gz"
+    checksum: "sha512:{{ tomcat_url }}.sha512"
+    mode: "0644"
+
+- name: Create Tomcat directory
+  ansible.builtin.file:
+    path: "{{ tomcat_home }}"
+    state: directory
+    owner: "{{ tomcat_user }}"
+    group: "{{ tomcat_user }}"
+    mode: "0755"
+
+- name: Unpack Tomcat
+  ansible.builtin.unarchive:
+    src: "/var/cache/apache-tomcat-{{ tomcat_version }}.tar.gz"
+    dest: "{{ tomcat_home }}"
+    remote_src: true
+    extra_opts: ["--strip-components=1"]
+    creates: "{{ tomcat_home }}/bin/catalina.sh"
+    owner: "{{ tomcat_user }}"
+    group: "{{ tomcat_user }}"
+  notify: Remove default Tomcat apps
+
+# ROOT.war: the JSP forms use absolute paths, so the app must live at "/"
+- name: Deploy the application as ROOT.war
+  ansible.builtin.copy:
+    src: "{{ tomcat_war_path }}"
+    dest: "{{ tomcat_home }}/webapps/ROOT.war"
+    owner: "{{ tomcat_user }}"
+    group: "{{ tomcat_user }}"
+    mode: "0644"
+  notify:
+    - Remove unpacked app
+    - Restart tomcat
+
+- name: Decide whether to load demo data (only into an empty database)
+  ansible.builtin.set_fact:
+    tomcat_db_seed: "{{ hostvars[groups['db'][0]]['mysql_db_empty'] | default(false) | bool }}"
+
+- name: Write app settings (readable by root only)
+  ansible.builtin.template:
+    src: travelagency.env.j2
+    dest: /etc/travelagency.env
+    owner: root
+    group: root
+    mode: "0600"
+  vars:
+    tomcat_db_seed_now: "{{ tomcat_db_seed }}"
+  notify: Restart tomcat
+
+- name: Install systemd unit
+  ansible.builtin.template:
+    src: tomcat.service.j2
+    dest: /etc/systemd/system/tomcat.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart tomcat
+
+- name: Open the app port
+  ansible.posix.firewalld:
+    port: "{{ tomcat_port }}/tcp"
+    permanent: true
+    immediate: true
+    state: enabled
+
+- name: Enable tomcat at boot
+  ansible.builtin.systemd_service:
+    name: tomcat
+    enabled: true
+    daemon_reload: true
+
+# Restart first, then "started": on the first deploy Tomcat starts exactly once,
+# so the demo data is loaded once
+- name: Start the app and wait for it
+  block:
+    - name: Apply restarts now
+      ansible.builtin.meta: flush_handlers
+
+    - name: Make sure tomcat is running
+      ansible.builtin.systemd_service:
+        name: tomcat
+        state: started
+
+    - name: Wait until the login page answers
+      ansible.builtin.uri:
+        url: "http://localhost:{{ tomcat_port }}/form-login"
+        status_code: 200
+      register: tomcat_login_page
+      until: tomcat_login_page.status == 200
+      retries: 30
+      delay: 5
+
+  # Always switch seeding off after the first start, even if the wait above failed:
+  # otherwise a reboot would load the demo data a second time.
+  # No restart here: the setting is read only at the next start.
+  always:
+    - name: Turn off demo data for future restarts
+      ansible.builtin.template:
+        src: travelagency.env.j2
+        dest: /etc/travelagency.env
+        owner: root
+        group: root
+        mode: "0600"
+      vars:
+        tomcat_db_seed_now: false
+      when: tomcat_db_seed | bool

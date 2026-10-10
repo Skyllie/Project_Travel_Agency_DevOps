@@ -1,0 +1,17 @@
+# Handlers run in this order, so the cleanup always happens before the restart.
+- name: Remove default Tomcat apps
+  ansible.builtin.file:
+    path: "{{ tomcat_home }}/webapps/{{ item }}"
+    state: absent
+  loop: [ROOT, docs, examples, host-manager, manager]
+
+- name: Remove unpacked app
+  ansible.builtin.file:
+    path: "{{ tomcat_home }}/webapps/ROOT"
+    state: absent
+
+- name: Restart tomcat
+  ansible.builtin.systemd_service:
+    name: tomcat
+    state: restarted
+    daemon_reload: true

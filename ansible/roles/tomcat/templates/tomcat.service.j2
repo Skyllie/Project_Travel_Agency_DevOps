@@ -1,0 +1,21 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Apache Tomcat {{ tomcat_version }} - TravelAgency
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User={{ tomcat_user }}
+Group={{ tomcat_user }}
+EnvironmentFile=/etc/travelagency.env
+# After a reboot ol-db may still be starting: wait for MySQL, otherwise the app fails to deploy
+ExecStartPre=/bin/bash -c 'until (echo > /dev/tcp/{{ travel_db_host }}/3306) 2>/dev/null; do sleep 2; done'
+TimeoutStartSec=300
+ExecStart={{ tomcat_home }}/bin/catalina.sh run
+# The JVM exits with 143 on SIGTERM; that is a normal stop, not a failure
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

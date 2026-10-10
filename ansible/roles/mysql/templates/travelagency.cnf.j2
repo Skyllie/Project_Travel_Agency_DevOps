@@ -1,0 +1,4 @@
+# {{ ansible_managed }}
+[mysqld]
+# Listen on the network so ol-app can connect; firewalld limits who gets through.
+bind-address = 0.0.0.0

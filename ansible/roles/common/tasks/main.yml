@@ -1,0 +1,31 @@
+- name: Set hostname from inventory
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname }}"
+
+- name: Add all lab hosts to /etc/hosts
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '\s{{ item }}$'
+    line: "{{ hostvars[item]['ansible_host'] }} {{ item }}"
+  loop: "{{ groups['all'] }}"
+
+- name: Install base packages
+  ansible.builtin.dnf:
+    name:
+      - firewalld
+      - tar
+      - python3-libselinux
+    state: present
+
+# Card D2: "SELinux in permissive mode" (applies now and after reboot)
+- name: Put SELinux into permissive mode
+  ansible.posix.selinux:
+    policy: targeted
+    state: permissive
+
+# Card D2: "Firewall is on"
+- name: Enable and start firewalld
+  ansible.builtin.systemd_service:
+    name: firewalld
+    enabled: true
+    state: started

@@ -1,0 +1,71 @@
+- name: Install MySQL 8.4 from the AppStream module and the Python driver for Ansible
+  ansible.builtin.dnf:
+    name:
+      - "@{{ mysql_module_stream }}/server"
+      - python3-PyMySQL
+    state: present
+
+- name: Allow network connections
+  ansible.builtin.template:
+    src: travelagency.cnf.j2
+    dest: /etc/my.cnf.d/travelagency.cnf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart mysqld
+
+- name: Enable and start mysqld
+  ansible.builtin.systemd_service:
+    name: mysqld
+    enabled: true
+    state: started
+
+- name: Apply config changes before creating users
+  ansible.builtin.meta: flush_handlers
+
+- name: Create the application database
+  community.mysql.mysql_db:
+    name: "{{ travel_db_name }}"
+    state: present
+    login_user: root
+    login_unix_socket: "{{ mysql_socket }}"
+
+# The user can connect only from ol-app's IP
+- name: Create the application user
+  community.mysql.mysql_user:
+    name: "{{ travel_db_user }}"
+    host: "{{ travel_app_host }}"
+    # MySQL 8.4 has mysql_native_password disabled, and a plain "password:" would use it
+    plugin: caching_sha2_password
+    plugin_auth_string: "{{ travel_db_password }}"
+    priv: "{{ travel_db_name }}.*:ALL"
+    # Set the password only on creation: these hashes can't be compared, so reruns would always "change"
+    update_password: on_create
+    state: present
+    login_user: root
+    login_unix_socket: "{{ mysql_socket }}"
+  no_log: true
+
+# Card D2: "Firewall is configured properly" - 3306 only for ol-app
+- name: Open 3306 for ol-app only
+  ansible.posix.firewalld:
+    rich_rule: 'rule family="ipv4" source address="{{ travel_app_host }}" port port="3306" protocol="tcp" accept'
+    permanent: true
+    immediate: true
+    state: enabled
+
+# Used by the tomcat role: demo data is loaded only into an empty database
+- name: Count tables in the application database
+  community.mysql.mysql_query:
+    login_db: information_schema
+    query: SELECT COUNT(*) AS n FROM tables WHERE table_schema = %s
+    positional_args:
+      - "{{ travel_db_name }}"
+    login_user: root
+    login_unix_socket: "{{ mysql_socket }}"
+  register: mysql_db_tables
+  changed_when: false
+
+- name: Remember whether the database is empty
+  ansible.builtin.set_fact:
+    mysql_db_empty: "{{ mysql_db_tables.query_result[0][0].n | int == 0 }}"

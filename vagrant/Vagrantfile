@@ -1,0 +1,52 @@
+# TravelAgency: two Oracle Linux 9 VMs on VMware Workstation.
+# Vagrant creates the VMs; Ansible (from the Ubuntu control node) configures them.
+#
+# Windows, PowerShell, in this folder:
+#   vagrant plugin install vagrant-vmware-desktop   # once
+#   vagrant up                                      # create / start both VMs
+#   vagrant destroy -f                              # delete both VMs
+
+MACHINES = {
+  "ol-db"  => { ip: "192.168.56.21", cpus: 1, memory: 1536 },
+  "ol-app" => { ip: "192.168.56.22", cpus: 2, memory: 2048 },
+}
+
+# Public SSH key of the Ansible control node (Ubuntu): put it next to this file
+CONTROL_KEY = File.join(File.dirname(__FILE__), "control_node.pub")
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "bento/oraclelinux-9"
+  config.vm.box_check_update = false
+  # No shared folder: the WAR and playbooks live on the control node, not on Windows
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  MACHINES.each do |name, spec|
+    config.vm.define name do |node|
+      node.vm.hostname = name
+      # Host-only network for VM <-> VM and control node <-> VM traffic;
+      # the first adapter stays NAT for internet access (dnf, Tomcat download)
+      node.vm.network "private_network", ip: spec[:ip]
+
+      node.vm.provider "vmware_desktop" do |v|
+        v.gui = false
+        v.vmx["displayName"] = name
+        v.vmx["memsize"] = spec[:memory].to_s
+        v.vmx["numvcpus"] = spec[:cpus].to_s
+      end
+
+      # Let Ansible on the control node log in as "vagrant" with its own key
+      if File.exist?(CONTROL_KEY)
+        node.vm.provision "shell", name: "control-node-key",
+          # Reads UTF-8, UTF-8 with BOM and UTF-16 (PowerShell "echo > file") the same way
+          args: [File.read(CONTROL_KEY, mode: "rb:BOM|UTF-8").encode("UTF-8").strip],
+          inline: <<~SHELL
+            install -d -m 700 -o vagrant -g vagrant /home/vagrant/.ssh
+            touch /home/vagrant/.ssh/authorized_keys
+            grep -qxF "$1" /home/vagrant/.ssh/authorized_keys || echo "$1" >> /home/vagrant/.ssh/authorized_keys
+            chown vagrant:vagrant /home/vagrant/.ssh/authorized_keys
+            chmod 600 /home/vagrant/.ssh/authorized_keys
+          SHELL
+      end
+    end
+  end
+end

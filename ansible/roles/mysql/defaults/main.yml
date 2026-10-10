@@ -1,0 +1,2 @@
+mysql_module_stream: "mysql:8.4"
+mysql_socket: /var/lib/mysql/mysql.sock

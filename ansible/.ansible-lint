@@ -1,0 +1,4 @@
+skip_list:
+  # community.mysql is kept on purpose: the new ansible.mysql name exists only in the
+  # newest Ansible, and the control node (Ubuntu 22.04, Python 3.10) runs an older one.
+  - fqcn[canonical]

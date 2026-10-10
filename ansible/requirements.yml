@@ -1,0 +1,8 @@
+# Collections for ansible-core 2.17 (the newest ansible-core that runs on Ubuntu 22.04 / Python 3.10):
+#   ansible-galaxy collection install -r requirements.yml
+# Versions are pinned to the ones the roles were checked against.
+collections:
+  - name: ansible.posix
+    version: ">=1.6.0,<2.0.0"
+  - name: community.mysql
+    version: ">=3.11.0,<4.0.0"
