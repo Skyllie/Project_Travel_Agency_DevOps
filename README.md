@@ -1,74 +1,32 @@
-# Travel Agency project
+# TravelAgency — DevOps Project
 
-<img src="./images/04.png" style="width: 600px; height: 350px;"><br>
-<br>
+TravelAgency is a web application for a travel agency: users find and book hotels in different countries, and a manager role adds hotels and rooms and sees all users and their bookings. It is built with Java, Spring MVC, Spring Security, Hibernate, JSP and MySQL, and is packaged as a WAR file for Tomcat 9.
 
-## Project Overview
+This repository is a DevOps project built around the application. Each deployment approach lives in its own branch with its own README. Weekly reports are in [`REPORTS/`](REPORTS).
 
-This project is a web application for a travel agency, allowing users to find and book hotels in various countries.
-It has a separate managerial role that can add hotels and rooms to the system and view all users and their orders.
-The application is built using Maven, Hibernate, Spring MVC (Thymeleaf or JSP + JSTL), and Spring Security.
+## Branches
 
-<img src="./images/01.png" style="width: 600px; height: 300px;"><br>
-<img src="./images/02.png" style="width: 600px; height: 300px;"><br>
-<img src="./images/03.png" style="width: 600px; height: 300px;"><br>
-<img src="./images/05.png" style="width: 600px; height: 300px;"><br>
-<img src="./images/06.png" style="width: 600px; height: 300px;"><br>
+| Branch | What it shows |
+| --- | --- |
+| `manual-setup` | Manual deployment on one Ubuntu machine: Java 17, Maven, MySQL, Tomcat 9 as a systemd service |
+| `ansible` | Two Oracle Linux 9 VMs — the application and the database on separate machines — created with Vagrant and configured with Ansible |
 
-## If you log in as an administrator, you can
+## Application Settings
 
-<img src="./images/07.png" style="width: 600px; height: 300px;"><br>
-<img src="./images/08.png" style="width: 600px; height: 300px;"><br>
-<img src="./images/09.png" style="width: 600px; height: 300px;"><br>
-<img src="./images/10.png" style="width: 600px; height: 300px;"><br>
-<img src="./images/11.png" style="width: 600px; height: 300px;"><br>
-<img src="./images/12.png" style="width: 600px; height: 300px;"><br>
-<img src="./images/13.png" style="width: 600px; height: 300px;"><br>
-<br>
+The application reads its settings from environment variables:
 
-## Technologies
+| Variable | Meaning |
+| --- | --- |
+| `DB_TRAVELAGENCY_URL` | JDBC URL, for example `jdbc:mysql://localhost:3306/travelagency?useSSL=false&allowPublicKeyRetrieval=true` |
+| `DB_TRAVELAGENCY_USER` | Database user |
+| `DB_TRAVELAGENCY_PASSWORD` | Database password |
+| `HBM2DDL_AUTO` | Hibernate schema mode; default `update` (tables are created if missing, data is kept) |
+| `DB_SEED` | `true` loads the demo data from `insert.sql` at startup — use it only once, on an empty database; default `false` |
 
-- Java
-- Maven
-- Hibernate
-- Spring MVC
-- Thymeleaf
-- Spring Security
-- IntelliJ (IDE)
-- MySQL
+Build with JDK 17 and Maven:
 
-### Technical Details
-
-- **Programming Language back-end:** Java
-- **Database:** MySql
-- **Required Tools:** Java 17, Maven 3.6.3
-
-### Running the Project
-
-1. **Build the Project:**
-   Execute the following command in the `TravelAgency` directory:
 ```bash
-mvn clean package
+mvn -B clean package -DskipTests      # result: target/TravelAgency.war
 ```
 
-2. **Run the Project:**
-
-After successful building, move the .war file in the Apache TomCat:
-
-```text
-   The application will start on 8080 port.
-```
-
-* **Database Configuration**
-
-In the application's configuration file (application.properties), the path and connection data to the database are obtained from the following environment variables:
-
-    DB_TRAVELAGENCY_URL
-    DB_TRAVELAGENCY_USER
-    DB_TRAVELAGENCY_PASSWORD
-
-Before running, ensure that the MySql database contains a database, for example travelagency.
-
-Wishing you success with the "Travel Agency" project!
-
----
+Deploy it to **Tomcat 9** as **`ROOT.war`**. The code uses `javax.*`, so it does not run on Tomcat 10 or newer, and the forms use absolute paths, so the application has to live at `/`.
