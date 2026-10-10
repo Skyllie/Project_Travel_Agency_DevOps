@@ -39,8 +39,8 @@ mysql -u travel -p -e "SHOW DATABASES;"      # the list must include travelagenc
 
 ```bash
 cd ~
-git clone -b manual-setup git@github.com:<your-account>/TravelAgency_DevOps.git
-cd TravelAgency_DevOps
+git clone -b manual-setup git@github.com:Skyllie/Project_Travel_Agency_DevOps.git
+cd Project_Travel_Agency_DevOps
 mvn -B clean package -DskipTests
 ls -lh target/TravelAgency.war
 ```
@@ -59,7 +59,7 @@ cd /tmp
 wget https://archive.apache.org/dist/tomcat/tomcat-9/v9.0.122/bin/apache-tomcat-9.0.122.tar.gz
 sudo tar -xzf apache-tomcat-9.0.122.tar.gz -C /opt/tomcat --strip-components=1
 sudo rm -rf /opt/tomcat/webapps/*
-sudo cp ~/TravelAgency_DevOps/target/TravelAgency.war /opt/tomcat/webapps/ROOT.war
+sudo cp ~/Project_Travel_Agency_DevOps/target/TravelAgency.war /opt/tomcat/webapps/ROOT.war
 sudo chown -R tomcat:tomcat /opt/tomcat
 ```
 
