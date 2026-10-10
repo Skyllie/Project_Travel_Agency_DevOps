@@ -101,8 +101,8 @@ ansible --version          # core 2.17.x — the newest one for Python 3.10 (Ubu
 
 ```bash
 cd ~
-git clone -b ansible git@github.com:<your-account>/TravelAgency_DevOps.git
-cd TravelAgency_DevOps
+git clone -b ansible git@github.com:Skyllie/Project_Travel_Agency_DevOps.git
+cd Project_Travel_Agency_DevOps
 ansible-galaxy collection install -r ansible/requirements.yml
 mvn -B clean package -DskipTests
 ls -lh target/TravelAgency.war
@@ -117,7 +117,7 @@ To use your own password instead, replace the file content with one line `vault_
 1. Clone this branch on Windows too (or copy the `vagrant` folder), for example to `C:\travel`.
 2. Put the Ubuntu key from step 3.1 next to the `Vagrantfile`. PowerShell:
    ```powershell
-   cd C:\travel\TravelAgency_DevOps\vagrant
+   cd C:\travel\Project_Travel_Agency_DevOps\vagrant
    Set-Content -Encoding ascii -Path control_node.pub -Value 'ssh-ed25519 AAAA... user@user'   # ← your line
    ```
    Notepad also works: choose "Save as type: All files", otherwise the file becomes `control_node.pub.txt`.
@@ -160,7 +160,7 @@ Ubuntu is on the NAT network and does not see `192.168.56.0/24`, the network Vag
 ## 7. Run Ansible
 
 ```bash
-cd ~/TravelAgency_DevOps/ansible
+cd ~/Project_Travel_Agency_DevOps/ansible
 ansible all -m ping --ask-vault-pass          # both VMs: "pong"
 ansible-playbook site.yml --ask-vault-pass
 ```
