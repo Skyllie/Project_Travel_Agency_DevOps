@@ -10,6 +10,12 @@ This repository is a DevOps project built around the application. Each deploymen
 | --- | --- |
 | `manual-setup` | Manual deployment on one Ubuntu machine: Java 17, Maven, MySQL, Tomcat 9 as a systemd service |
 | `ansible` | Two Oracle Linux 9 VMs — the application and the database on separate machines — created with Vagrant and configured with Ansible |
+| `docker` | The application and MySQL in containers with Docker Compose; multi-stage Dockerfile |
+| `docker-load-balancer` | Three application servers behind an Nginx load balancer; switchable algorithms, sticky sessions, failover |
+| `terraform` | The load-balanced stack as code: Terraform with the Docker provider |
+| `jenkins` | CI/CD: a Jenkins pipeline builds, tests and deploys every commit with Terraform |
+
+Each branch starts from the previous one: `main` → `docker` → `docker-load-balancer` → `terraform` → `jenkins`.
 
 ## Application Settings
 
