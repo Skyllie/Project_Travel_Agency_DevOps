@@ -223,5 +223,9 @@ resource "docker_container" "lb" {
     retries  = 3
   }
 
+  # Terraform returns only when Nginx answers, so the site works right after apply
+  wait         = true
+  wait_timeout = 60
+
   depends_on = [docker_container.app_first, docker_container.app_more]
 }
