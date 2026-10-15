@@ -1,9 +1,24 @@
-# TravelAgency in containers: MySQL 8.4 + the application on Tomcat 9.
+# TravelAgency behind a load balancer: Nginx -> 3 application servers -> MySQL 8.4.
 #   cp .env.example .env      # then change the passwords in .env
 #   docker compose up -d --build
-#   http://<host>:8080/
+#   http://<host>/            (LB_PORT, 80 by default)
 
 name: travelagency
+
+# Settings shared by the three application servers
+x-app: &app
+  build: .
+  image: travelagency:local
+  restart: unless-stopped
+  expose:
+    - "8080"
+
+x-app-env: &app-env
+  DB_HOST: db
+  DB_NAME: ${DB_NAME:-travelagency}
+  DB_TRAVELAGENCY_USER: ${DB_USER:-travel}
+  DB_TRAVELAGENCY_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+  HBM2DDL_AUTO: update
 
 services:
   db:
@@ -25,30 +40,84 @@ services:
       retries: 30
       start_period: 30s
     networks:
-      - backend
+      lb_net:
+        ipv4_address: 172.30.0.10
 
-  app:
-    build: .
-    image: travelagency:local
-    restart: unless-stopped
+  # app1 starts first: it creates the tables and, on an empty database, loads the demo data
+  app1:
+    <<: *app
     depends_on:
       db:
         condition: service_healthy
     environment:
-      DB_HOST: db
-      DB_NAME: ${DB_NAME:-travelagency}
-      DB_TRAVELAGENCY_USER: ${DB_USER:-travel}
-      DB_TRAVELAGENCY_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
-      HBM2DDL_AUTO: update
-      DB_SEED: auto          # demo data only into an empty database
-      JAVA_OPTS: ${JAVA_OPTS:--Xmx384m}
-    ports:
-      - "${APP_PORT:-8080}:8080"
+      <<: *app-env
+      DB_SEED: auto
+      # jvmRoute: Tomcat adds ".app1" to the session id, the balancer uses it for sticky sessions
+      JAVA_OPTS: ${JAVA_OPTS:--Xmx320m} -DjvmRoute=app1
     networks:
-      - backend
+      lb_net:
+        ipv4_address: 172.30.0.11
+
+  # app2 and app3 start after app1 is healthy (the tables exist) and never load demo data
+  app2:
+    <<: *app
+    depends_on:
+      app1:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+      DB_SEED: "false"
+      JAVA_OPTS: ${JAVA_OPTS:--Xmx320m} -DjvmRoute=app2
+    networks:
+      lb_net:
+        ipv4_address: 172.30.0.12
+
+  app3:
+    <<: *app
+    depends_on:
+      app1:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+      DB_SEED: "false"
+      JAVA_OPTS: ${JAVA_OPTS:--Xmx320m} -DjvmRoute=app3
+    networks:
+      lb_net:
+        ipv4_address: 172.30.0.13
+
+  lb:
+    image: nginx:1.28-alpine
+    restart: unless-stopped
+    depends_on:
+      app1:
+        condition: service_healthy
+      app2:
+        condition: service_healthy
+      app3:
+        condition: service_healthy
+    environment:
+      LB_ALGORITHM: ${LB_ALGORITHM:-round_robin}   # file name in lb/upstreams/
+      LB_STICKY: ${LB_STICKY:-on}                  # on | off
+    volumes:
+      - ./lb/templates:/etc/nginx/templates:ro
+      - ./lb/upstreams:/etc/nginx/upstreams:ro
+      - ./lb/sticky:/etc/nginx/sticky:ro
+    ports:
+      - "${LB_PORT:-80}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/nginx-status"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      lb_net:
+        ipv4_address: 172.30.0.20
 
 volumes:
   db_data:
 
 networks:
-  backend:
+  lb_net:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

@@ -1,0 +1,80 @@
+# Nginx load balancer for TravelAgency.
+# The nginx image renders this template at start (envsubst) with:
+#   LB_ALGORITHM=${LB_ALGORITHM}   LB_STICKY=${LB_STICKY}
+# To change them: edit .env (or set them in the shell) and run  docker compose up -d lb
+
+# The pool of all application servers. The balancing algorithm is in the included file.
+include /etc/nginx/upstreams/${LB_ALGORITHM}.conf;
+
+# One upstream per server, for sticky sessions. The other servers are "backup":
+# if the server that owns the session is down, the user gets another one
+# (and logs in again) instead of an error page.
+upstream node_app1 {
+    zone node_app1 64k;
+    server 172.30.0.11:8080;
+    server 172.30.0.12:8080 backup;
+    server 172.30.0.13:8080 backup;
+}
+upstream node_app2 {
+    zone node_app2 64k;
+    server 172.30.0.12:8080;
+    server 172.30.0.11:8080 backup;
+    server 172.30.0.13:8080 backup;
+}
+upstream node_app3 {
+    zone node_app3 64k;
+    server 172.30.0.13:8080;
+    server 172.30.0.11:8080 backup;
+    server 172.30.0.12:8080 backup;
+}
+
+# Tomcat adds its jvmRoute to the session id: JSESSIONID=4F1C0D...E2.app2.
+# A request with such a cookie goes back to that server; a new visitor goes to the pool.
+map $cookie_JSESSIONID $sticky_upstream {
+    ~\.(?<route>app[1-3])$  node_$route;
+    default                 travel_pool;
+}
+
+# Name of the server that answered (for the X-Served-By header and the log).
+# After a retry $upstream_addr holds several addresses; the last one answered.
+map $upstream_addr $served_by {
+    ~172\.30\.0\.11:8080$  app1;
+    ~172\.30\.0\.12:8080$  app2;
+    ~172\.30\.0\.13:8080$  app3;
+    default                $upstream_addr;
+}
+
+log_format balancer '$remote_addr "$request" $status -> $served_by '
+                    '(tried: $upstream_addr, $upstream_response_time s)';
+
+server {
+    listen 80;
+    server_name _;
+    access_log /var/log/nginx/access.log balancer;
+
+    location / {
+        # proxy_pass: to the pool (LB_STICKY=off) or to the session owner (LB_STICKY=on)
+        include /etc/nginx/sticky/${LB_STICKY}.conf;
+
+        proxy_http_version 1.1;
+        proxy_set_header Connection        "";          # keep-alive connections to Tomcat
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # A server that refuses the connection, times out or answers 502-504 is skipped:
+        # the request goes to the next server of the pool
+        proxy_connect_timeout     2s;
+        proxy_next_upstream       error timeout http_502 http_503 http_504;
+        proxy_next_upstream_tries 3;
+
+        add_header X-Served-By $served_by always;
+    }
+
+    # Nginx counters: active connections, accepted and handled requests
+    location = /nginx-status {
+        stub_status;
+        access_log off;
+    }
+}
