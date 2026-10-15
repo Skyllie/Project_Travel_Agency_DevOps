@@ -1,0 +1,72 @@
+# Jenkins Configuration as Code. Values like ${TRAVEL_DB_PASSWORD} come from the
+# environment of the container (jenkins/.env), so no secret is stored in Git.
+
+jenkins:
+  systemMessage: "TravelAgency CI/CD. Configured as code: jenkins/casc.yaml"
+  numExecutors: 2
+  mode: NORMAL
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "${JENKINS_ADMIN_ID}"
+          password: "${JENKINS_ADMIN_PASSWORD}"
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - string:
+              scope: GLOBAL
+              id: "travel-db-password"
+              secret: "${TRAVEL_DB_PASSWORD}"
+              description: "TravelAgency: password of the database user"
+          - string:
+              scope: GLOBAL
+              id: "travel-db-root-password"
+              secret: "${TRAVEL_DB_ROOT_PASSWORD}"
+              description: "TravelAgency: MySQL root password"
+
+unclassified:
+  location:
+    url: "${JENKINS_PUBLIC_URL}"
+
+# The pipeline job: Jenkinsfile from the jenkins branch of the repository.
+# JCasC re-creates the job at every Jenkins start, so the parameters and the poll
+# trigger are declared here too (the Jenkinsfile declares the same ones).
+jobs:
+  - script: |
+      pipelineJob('travelagency') {
+        description('Build the image, deploy it with Terraform, smoke-test the load balancer. Jenkinsfile: branch ${REPO_BRANCH}')
+        parameters {
+          choiceParam('LB_ALGORITHM', ['round_robin', 'weighted', 'least_conn', 'ip_hash', 'hash', 'random', 'backup'], 'Nginx load-balancing algorithm')
+          choiceParam('APP_REPLICAS', ['3', '2', '1', '4', '5'], 'Number of application servers')
+          booleanParam('LB_STICKY', true, 'Sticky sessions by the Tomcat jvmRoute in JSESSIONID')
+        }
+        properties {
+          pipelineTriggers {
+            triggers {
+              pollSCM {
+                scmpoll_spec('H/5 * * * *')
+              }
+            }
+          }
+        }
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote {
+                  url('${REPO_URL}')
+                }
+                branch('*/${REPO_BRANCH}')
+              }
+            }
+            scriptPath('Jenkinsfile')
+            lightweight(true)
+          }
+        }
+      }

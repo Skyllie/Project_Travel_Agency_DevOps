@@ -1,115 +1,130 @@
-# TravelAgency — Infrastructure as Code with Terraform
+# TravelAgency — CI/CD with Jenkins
 
-This branch describes the whole load-balanced stack in **Terraform** (provider `kreuzwerker/docker`): the network, the database volume, MySQL, the application servers and the Nginx load balancer.
-It covers the card "Implement Infrastructure as Code".
-It builds on the `docker-load-balancer` branch: the same image, the same Nginx logic, but created, changed and deleted by `terraform apply` / `terraform destroy` instead of Docker Compose.
+This branch adds a **Jenkins** pipeline that builds, tests and deploys TravelAgency on every new commit.
+It covers the card "Implement a Continuous Integration/Continuous Delivery".
+It builds on the `terraform` branch: Jenkins builds the image and deploys it with the same Terraform code.
 
 ```
-terraform apply
-   │  provider kreuzwerker/docker  →  /var/run/docker.sock
+git push (branch jenkins)
+   │  Jenkins checks the branch every 5 minutes (pollSCM)
    ▼
-network travelagency-tf-net 172.31.0.0/24        volume travelagency-tf-db-data
-   ├── travelagency-tf-db     mysql:8.4            172.31.0.10
-   ├── travelagency-tf-app1   travelagency:local   172.31.0.11  DB_SEED=auto
-   ├── travelagency-tf-app2…N travelagency:local   172.31.0.12… DB_SEED=false
-   └── travelagency-tf-lb     nginx:1.28-alpine    172.31.0.20  host port 80
-                              config generated from templates/nginx.conf.tftpl
+Jenkins  (container, http://<Ubuntu IP>:8081, configured as code)
+   1. Version          image tag = short commit id, e.g. travelagency:3f2a9c1
+   2. Build and test   docker build: Maven compiles, runs unit tests (none yet), packs the WAR
+   3. Terraform check  terraform fmt -check, init, validate
+   4. Deploy           terraform plan + apply with the new tag → MySQL, N Tomcats, Nginx
+   5. Smoke test       HTTP 200 through the load balancer, which servers answered
+   │
+   ▼  through /var/run/docker.sock
+Docker on Ubuntu:  travelagency-tf-db, -app1…N, -lb  →  http://<Ubuntu IP>/
 ```
 
 | File | What it is |
 | --- | --- |
-| `terraform/versions.tf` | Terraform and provider versions, local state, the Docker provider |
-| `terraform/variables.tf` | Everything that can change: number of servers, algorithm, sticky sessions, port, passwords |
-| `terraform/main.tf` | The resources: network, volume, images, `db`, `app_first`, `app_more`, `lb` |
-| `terraform/templates/nginx.conf.tftpl` | Nginx config, generated for the chosen algorithm and number of servers |
-| `terraform/outputs.tf` | URL, servers and their IPs, algorithm, image |
-| `terraform/terraform.tfvars.example` | Passwords and settings; copy to `terraform.tfvars` |
+| `Jenkinsfile` | The pipeline: 5 stages, parameters, poll trigger, image cleanup |
+| `jenkins/Dockerfile` | Jenkins LTS (JDK 21) + Docker CLI + Terraform + plugins |
+| `jenkins/plugins.txt` | Plugins installed at build time |
+| `jenkins/casc.yaml` | Configuration as code: admin user, credentials, the `travelagency` job |
+| `jenkins/docker-compose.yml` | Runs Jenkins on port 8081 with access to the host Docker |
+| `jenkins/.env.example` | Admin password, database passwords, repository, Docker group id |
 
-## 1. Install Terraform on Ubuntu
+Nothing is configured by hand in the Jenkins UI: after `docker compose up` the job, the credentials and the admin user already exist.
 
-Docker is needed as well (README of the `docker` branch).
+## 1. Before You Start
 
-```bash
-sudo apt-get install -y gnupg software-properties-common wget
-wget -O- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
-sudo apt-get update && sudo apt-get install -y terraform
-terraform -version
-```
+- Docker on Ubuntu (README of the `docker` branch). Terraform on Ubuntu is not needed: it is inside the Jenkins image.
+- Stop the earlier stacks, they use the same ports and names:
+  - `docker compose down` in the folders of the `docker` and `docker-load-balancer` branches;
+  - `terraform destroy` in the folder of the `terraform` branch, if you created the stack by hand. From now on Jenkins owns it.
+- RAM: Jenkins needs about 1 GB on top of the three Tomcats and MySQL. Give the Ubuntu VM 6 GB (shut down `ol-app` and `ol-db` with `vagrant halt`).
 
-## 2. Create the Stack
+## 2. Start Jenkins
 
 ```bash
-git clone -b terraform https://github.com/Skyllie/Project_Travel_Agency_DevOps.git ~/travel-tf
-cd ~/travel-tf
-docker build -t travelagency:local .          # Terraform uses this image, it does not build it
-cd terraform
-cp terraform.tfvars.example terraform.tfvars
-nano terraform.tfvars                         # change the two passwords
-terraform init                                # downloads the Docker provider
-terraform fmt -check && terraform validate    # style and syntax
-terraform plan                                # what will be created: 9 resources with 3 servers
-terraform apply                               # answer "yes"; 2–3 minutes
-terraform output
+git clone -b jenkins https://github.com/Skyllie/Project_Travel_Agency_DevOps.git ~/travel-jenkins
+cd ~/travel-jenkins/jenkins
+cp .env.example .env
+nano .env                                                  # JENKINS_ADMIN_PASSWORD and the two DB passwords
+echo "DOCKER_GID=$(getent group docker | cut -d: -f3)" >> .env
+docker compose up -d --build                               # 5–10 minutes the first time: plugins download
+docker compose logs -f jenkins                             # wait for "Jenkins is fully up and running", Ctrl+C
 ```
 
-Port 80 must be free: stop the Compose stack of the `docker-load-balancer` branch first (`docker compose down` in its folder) or set `lb_port = 8088`.
+Open `http://<Ubuntu IP>:8081/` on Windows and log in as `admin` with `JENKINS_ADMIN_PASSWORD`.
+The job **travelagency** is already there.
 
-`apply` creates the resources in this order, and waits for each `healthy` before the next step (`wait = true`): network and volume → MySQL → app1 (creates the tables, loads the demo data) → the other servers → the load balancer.
+## 3. First Run
 
-## 3. Change the Infrastructure
+1. **travelagency → Build with Parameters → Build** (the defaults: `round_robin`, 3 servers, sticky sessions on).
+2. Watch the stages in **Pipeline Overview** or in **Console Output**. The first run takes 5–10 minutes (Maven dependencies, base images, Terraform provider).
+3. At the end of the log: the Terraform outputs and the smoke test, for example:
+   ```
+   HTTP 200 from http://host.docker.internal:80/form-login
+   15 new visitors, algorithm round_robin:
+         5 app1
+         5 app2
+         5 app3
+   ```
+4. Open `http://<Ubuntu IP>/` — the site, deployed by Jenkins.
 
-Every change is a change of a variable and one `terraform apply`. `plan` shows what will happen before anything is touched.
+## 4. Continuous Delivery
 
-| Change | Command | What Terraform does |
+Every commit to the `jenkins` branch is deployed automatically:
+
+```bash
+# in a clone of the jenkins branch
+git commit --allow-empty -m "Trigger the pipeline"     # or any real change
+git push
+```
+
+Within 5 minutes Jenkins notices the commit (**Polling Log** of the job), builds the image `travelagency:<new commit id>`, and Terraform recreates the application servers with it.
+
+**Rollback** goes the same way: `git revert <bad commit>` and `git push` — the pipeline builds and deploys the previous code. Do not run `terraform apply` by hand for this stack: Jenkins keeps its own state in `/var/jenkins_home/tfstate/`.
+
+GitHub cannot call Jenkins on a home PC (no public address), so Jenkins asks GitHub instead (polling). With a public Jenkins, a GitHub webhook would start the build at once.
+
+## 5. Parameters
+
+**Build with Parameters** changes the deployment without changing code:
+
+| Parameter | Values | What changes |
 | --- | --- | --- |
-| Another algorithm | `terraform apply -var lb_algorithm=weighted` | Generates a new Nginx config and recreates only the `lb` container |
-| Fewer servers | `terraform apply -var app_replicas=2` | Removes `app3`, recreates `lb` without it |
-| More servers | `terraform apply -var app_replicas=5` | Adds `app4` and `app5` (172.31.0.14, .15), recreates `lb` with them |
-| Sticky sessions off | `terraform apply -var lb_sticky=false` | Recreates `lb` |
-| New version of the app | `docker build -t travelagency:v2 ..` and `terraform apply -var app_image=travelagency:v2` | Recreates the application servers with the new image |
-| Delete everything | `terraform destroy` | Removes containers, network and volume (the database too); the images stay |
+| `LB_ALGORITHM` | `round_robin`, `weighted`, `least_conn`, `ip_hash`, `hash`, `random`, `backup` | Nginx config; only the `lb` container is recreated |
+| `APP_REPLICAS` | 1–5 | Number of Tomcats; Terraform adds or removes servers |
+| `LB_STICKY` | checkbox (on by default) | Sticky sessions by `jvmRoute` |
 
-To keep a change, write it into `terraform.tfvars` instead of `-var`.
+The smoke test prints how 15 new visitors were spread; with `round_robin` it fails if not all servers answered.
 
-Check the result with the script from the previous branch: `../lb/demo.sh` (it calls `http://localhost/form-login`).
+## 6. How It Is Built
 
-### Drift: Terraform restores what was changed by hand
+- **Jenkins as code.** `jenkins/casc.yaml` (Configuration as Code plugin) creates the admin user, two secret-text credentials and the pipeline job (Job DSL). Secrets come from `jenkins/.env` through environment variables, so the Git repository has none.
+- **Docker from Jenkins.** The host socket `/var/run/docker.sock` is mounted into the container, and the `jenkins` user is added to the host `docker` group (`DOCKER_GID`). `docker build` and Terraform inside Jenkins work with the host Docker directly. This gives Jenkins full control of the host Docker, so the Jenkins UI must stay protected by a password.
+- **Tests in the build.** The Dockerfile build stage runs `mvn package`. The project has no unit tests yet; as soon as tests are added to `src/test`, they run there, and a failing test stops the image build, so nothing is deployed. Until then the smoke test after the deploy is the check.
+- **Image tag = commit.** Each build has its own tag (`git rev-parse --short=7 HEAD`), so the running version is always known (`terraform output app_image`, build description).
+- **Terraform state** is in the `jenkins_home` volume (`/var/jenkins_home/tfstate/`), so each build changes only what is different.
+- **Secrets in the log.** The DB passwords are passed with `withCredentials` as `TF_VAR_…` variables: Jenkins masks them as `****`, and Terraform shows them as `(sensitive value)`.
+- **One build at a time** (`disableConcurrentBuilds`), 30-minute timeout, the last 15 builds kept.
 
-```bash
-docker rm -f travelagency-tf-app2      # "someone" deleted a server
-terraform plan                          # Plan: 1 to add — travelagency-tf-app2
-terraform apply                         # it is back
-```
+## 7. Check
 
-## 4. Check
-
-| What | Command | Expected |
+| What | Where | Expected |
 | --- | --- | --- |
-| Code is formatted and valid | `terraform fmt -check && terraform validate` | `Success! The configuration is valid.` |
-| Everything was created | `terraform state list` | `data.docker_image.app`, network, volume, two images, `db`, `app_first`, `app_more[0]`, `app_more[1]`, `lb` |
-| Containers are healthy | `docker ps --filter name=travelagency-tf` | all `healthy` |
-| The site answers | `curl -s -o /dev/null -w '%{http_code}\n' http://localhost/form-login` | `200` |
-| Requests are spread | `../lb/demo.sh` | app1, app2, app3 |
-| Nothing to change | `terraform plan` right after `apply` | `No changes. Your infrastructure matches the configuration.` |
-| Demo data loaded once | `docker logs travelagency-tf-app1 \| grep entrypoint` | first apply: `DB_SEED=true` |
+| Jenkins is up | `docker compose ps` in `jenkins/` | `Up` |
+| Configured as code | Manage Jenkins → Configuration as Code | `casc.yaml` loaded, no errors |
+| The job and credentials exist | Dashboard; Manage Jenkins → Credentials | `travelagency`; `travel-db-password`, `travel-db-root-password` |
+| A build passes | travelagency → Build Now | all five stages green |
+| The stack is running | `docker ps --filter name=travelagency-tf` | db, app1–3, lb: healthy |
+| CD works | push a commit to `jenkins` | a new build starts within 5 minutes, a new image tag in `docker ps` |
+| Docker works from Jenkins | `docker compose exec jenkins docker ps` | the host containers |
 
-## 5. Why It Is Built This Way
-
-- **Image built outside Terraform.** `data "docker_image"` only reads the local image. Building is the job of `docker build` (and later of Jenkins); Terraform describes where and how the image runs. A new version is a new tag in `app_image`.
-- **`app_first` and `app_more`.** On an empty database the first server must create the tables alone. `app_more` depends on `app_first`, and `wait = true` makes Terraform wait until it is healthy.
-- **Config generated from a template.** `templatefile()` writes the pool for the chosen algorithm and one upstream per server. The file is uploaded into the container (`upload`), so the algorithm or the number of servers changes in one variable.
-- **Validation of variables.** A wrong algorithm name or `app_replicas = 7` stops at `plan` with a clear message, before anything changes.
-- **Secrets.** Passwords are `sensitive`: `plan` shows them as `(sensitive value)`. They are in `terraform.tfvars` and in the state, both in `.gitignore`. The state file holds them in plain text, so it stays on the Ubuntu machine only.
-- **Separate subnet and names.** `172.31.0.0/24` and the `travelagency-tf-` prefix do not clash with the Compose stack (`172.30.0.0/24`, `travelagency-`).
-
-## 6. If Something Goes Wrong
+## 8. If Something Goes Wrong
 
 | Problem | What to do |
 | --- | --- |
-| `did not find docker image 'travelagency:local'` | Build it: `docker build -t travelagency:local ..` (from the `terraform` folder) |
-| `port is already allocated` | Port 80 is busy (the Compose stack?): `docker compose down` there, or `lb_port = 8088` |
-| `Pool overlaps with other one on this address space` | Another Docker network uses `172.31.0.0/24`: `docker network ls`, or set `subnet` |
-| `container ... is not healthy` / timeout at `app_first` | `docker logs travelagency-tf-app1`; with an empty database the first start takes 1–2 minutes |
-| `Error acquiring the state lock` | Another `terraform` is running; if it crashed: `terraform force-unlock <ID>` |
-| `permission denied ... docker.sock` | The user is not in the `docker` group: `sudo usermod -aG docker $USER`, log in again |
+| `permission denied ... /var/run/docker.sock` in the build | `DOCKER_GID` in `jenkins/.env` is wrong or missing: `getent group docker`, fix it, `docker compose up -d` |
+| `Conflict. The container name "/travelagency-tf-db" is already in use` | The stack was created by hand: `terraform destroy` in the `terraform` branch folder (or `docker rm -f` the `travelagency-tf-*` containers), then build again |
+| `terraform fmt -check` fails | Run `terraform fmt` in `terraform/`, commit the change |
+| Smoke test: `HTTP 000` | Port 80 is used by something else, or the `lb` container failed: `docker logs travelagency-tf-lb` |
+| `Bind for 0.0.0.0:80 failed: port is already allocated` | Another stack is running: `docker compose down` in the Compose branches |
+| The job is missing | `docker compose logs jenkins \| grep -i casc` — an error in `casc.yaml` or a missing variable in `.env` |
+| New commits do not start builds | **Polling Log** of the job: Jenkins must be able to reach GitHub; the trigger is set in `casc.yaml` and in the Jenkinsfile |

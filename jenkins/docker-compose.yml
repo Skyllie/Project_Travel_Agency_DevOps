@@ -1,0 +1,36 @@
+# Jenkins for the TravelAgency pipeline.
+#   cd jenkins
+#   cp .env.example .env && nano .env
+#   echo "DOCKER_GID=$(getent group docker | cut -d: -f3)" >> .env
+#   docker compose up -d --build
+#   http://<Ubuntu IP>:8081/
+
+name: jenkins
+
+services:
+  jenkins:
+    build: .
+    image: travelagency-jenkins:local
+    restart: unless-stopped
+    ports:
+      - "${JENKINS_PORT:-8081}:8080"
+    environment:
+      JENKINS_ADMIN_ID: ${JENKINS_ADMIN_ID:-admin}
+      JENKINS_ADMIN_PASSWORD: ${JENKINS_ADMIN_PASSWORD:?set JENKINS_ADMIN_PASSWORD in .env}
+      JENKINS_PUBLIC_URL: ${JENKINS_PUBLIC_URL:-http://localhost:8081/}
+      TRAVEL_DB_PASSWORD: ${TRAVEL_DB_PASSWORD:?set TRAVEL_DB_PASSWORD in .env}
+      TRAVEL_DB_ROOT_PASSWORD: ${TRAVEL_DB_ROOT_PASSWORD:?set TRAVEL_DB_ROOT_PASSWORD in .env}
+      REPO_URL: ${REPO_URL:-https://github.com/Skyllie/Project_Travel_Agency_DevOps.git}
+      REPO_BRANCH: ${REPO_BRANCH:-jenkins}
+    # The jenkins user joins the group that owns /var/run/docker.sock on the host
+    group_add:
+      - "${DOCKER_GID:?set DOCKER_GID in .env: getent group docker | cut -d: -f3}"
+    # The smoke test calls the load balancer published on the host
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  jenkins_home:
