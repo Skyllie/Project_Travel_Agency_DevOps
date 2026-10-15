@@ -1,0 +1,54 @@
+# TravelAgency in containers: MySQL 8.4 + the application on Tomcat 9.
+#   cp .env.example .env      # then change the passwords in .env
+#   docker compose up -d --build
+#   http://<host>:8080/
+
+name: travelagency
+
+services:
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: ${DB_NAME:-travelagency}
+      MYSQL_USER: ${DB_USER:-travel}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      # TCP on 127.0.0.1: during the first start MySQL runs a temporary server
+      # without networking, so the check passes only when the real server is up
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks:
+      - backend
+
+  app:
+    build: .
+    image: travelagency:local
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_NAME: ${DB_NAME:-travelagency}
+      DB_TRAVELAGENCY_USER: ${DB_USER:-travel}
+      DB_TRAVELAGENCY_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      HBM2DDL_AUTO: update
+      DB_SEED: auto          # demo data only into an empty database
+      JAVA_OPTS: ${JAVA_OPTS:--Xmx384m}
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    networks:
+      - backend
+
+volumes:
+  db_data:
+
+networks:
+  backend:

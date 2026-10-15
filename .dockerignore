@@ -1,0 +1,12 @@
+# Only pom.xml, src/ and docker/ are needed to build the image
+.git
+.env
+target
+REPORTS
+images
+lb
+terraform
+jenkins
+*.md
+LICENSE
+docker-compose.yml

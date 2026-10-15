@@ -70,3 +70,6 @@ test-results/
 
 # General
 HELP.md
+
+# Docker / Terraform secrets
+.env
