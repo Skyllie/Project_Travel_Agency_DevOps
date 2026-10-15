@@ -1,0 +1,10 @@
+# Copy to terraform.tfvars and change the passwords:  cp terraform.tfvars.example terraform.tfvars
+# terraform.tfvars is in .gitignore and never goes to GitHub.
+
+mysql_root_password = "change-me-root"
+db_password         = "change-me"
+
+app_replicas = 3             # 1..5 application servers
+lb_algorithm = "round_robin" # round_robin | weighted | least_conn | ip_hash | hash | random | backup
+lb_sticky    = true
+lb_port      = 80

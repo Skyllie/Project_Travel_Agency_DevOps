@@ -1,0 +1,11 @@
+# Provider plugins, downloaded by terraform init
+.terraform/
+
+# State and plans hold the passwords in plain text: never commit them
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+
+# Real values of the variables
+terraform.tfvars
