@@ -65,7 +65,8 @@ resource "docker_network" "lb_net" {
   name = "${var.project}-net"
 
   ipam_config {
-    subnet = var.subnet
+    subnet  = var.subnet
+    gateway = cidrhost(var.subnet, 1)
   }
 }
 
