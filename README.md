@@ -36,3 +36,15 @@ mvn -B clean package -DskipTests      # result: target/TravelAgency.war
 ```
 
 Deploy it to **Tomcat 9** as **`ROOT.war`**. The code uses `javax.*`, so it does not run on Tomcat 10 or newer, and the forms use absolute paths, so the application has to live at `/`.
+
+## Checking the Project
+
+`scripts/check-project.sh` checks every branch and the whole Git history for secrets and hardcoded settings, runs the scanners (gitleaks, hadolint, shellcheck, trivy, `nginx -t`, `terraform validate`, `ansible-lint`) and, when the stack runs on this machine, checks the containers, the site and Jenkins. It changes nothing in the branches or in the running containers (`--help` lists the few things it downloads). Scanners that are not installed are downloaded once to `~/.cache/travelagency-check` and checked against pinned SHA-256 sums.
+
+```bash
+bash scripts/check-project.sh                  # everything
+bash scripts/check-project.sh --skip runtime   # only the code, not the running stack
+bash scripts/check-project.sh --help           # all options
+```
+
+Every result is PASS, WARN (worth fixing or an accepted risk), FAIL (must be fixed), SKIP (could not be checked here) or INFO. The report is also saved to `/tmp`. The exit code is 1 when there is at least one FAIL, so the script can run in a pipeline too.
