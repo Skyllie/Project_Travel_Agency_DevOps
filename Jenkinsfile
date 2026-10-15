@@ -54,7 +54,8 @@ pipeline {
             steps {
                 // The first stage of the Dockerfile runs "mvn package": compile, unit tests
                 // (the project has none yet; new ones in src/test run here), WAR
-                sh 'docker build -t "$IMAGE" -t travelagency:latest .'
+                // --provenance=false: an unchanged app keeps the same image ID, so Terraform does not restart it
+                sh 'docker build --provenance=false -t "$IMAGE" -t travelagency:latest .'
             }
         }
 
