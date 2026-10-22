@@ -33,6 +33,7 @@ Jenkins  (http://<Ubuntu IP>:8081)
 | `jenkins/plugins.txt` | Adds Warnings (`warnings-ng`): the scanner results as pages of the build |
 | `jenkins/casc.yaml` | New credential `snyk-token` |
 | `ci/nexus.sh` | Uploads the SBOM next to the WAR |
+| `pom.xml` | Libraries upgraded after the first scan (section 4) |
 
 | Scanner | What it scans | Database |
 | --- | --- | --- |
@@ -94,6 +95,7 @@ The gate prints each blocking finding as `severity id package installed-version 
 | No fixed version you can use | Add it to `ci/accepted-risks.txt` with the reason and an end date (section 5) |
 
 The original libraries of the project have known critical vulnerabilities, for example Spring Framework 5.3.9 (CVE-2022-22965, "Spring4Shell", remote code execution in exactly this setup: Spring MVC as a WAR on Tomcat with JDK 9+) and Spring Security 5.6.0 (CVE-2022-22978, authorization bypass). So the first commit of this branch, which adds only the scans, stops at the gate.
+The second commit raises them to the last open-source releases of the same lines (Spring Framework 5.3.39, Spring Security 5.8.16, MySQL Connector/J 8.4.0, Hibernate 5.6.15, Logback 1.2.13), removes the unused Thymeleaf and Jetty libraries and the duplicate declarations in `pom.xml`, and switches the JDBC driver class to `com.mysql.cj.jdbc.Driver`. The four critical vulnerabilities left have no open-source fix in Spring 5; they are accepted with a reason (section 5).
 
 ## 5. Accepted Risks
 
@@ -107,6 +109,15 @@ The original libraries of the project have known critical vulnerabilities, for e
 - The scanners still report it; only the gate lets it pass, and prints `(accepted: ci/accepted-risks.txt)` next to it.
 - After the date the gate blocks it again, so an accepted risk is looked at again instead of being forgotten.
 - Every line is a decision in Git: who accepted what, when and why.
+
+Accepted now, all until 2027-04-30. Their open-source fixes are only in Spring 6 or 7, which need Jakarta EE and Tomcat 10: a migration of the whole application. The 5.x fixes are sold as Enterprise Support only.
+
+| ID | Library | What it is | Why TravelAgency can live with it for now |
+| --- | --- | --- | --- |
+| CVE-2016-1000027 | spring-web | Java deserialization in `HttpInvokerServiceExporter` | No HTTP Invoker, no Java deserialization |
+| CVE-2026-47884 | spring-webmvc | SSRF and remote code execution through `XsltView` with a `"/**"` mapping | Views are JSP only; no `XsltView`, no `"/**"` view mapping |
+| CVE-2026-22732 | spring-security-web | Security headers are not written when the application sets such headers itself | The application neither configures nor sets response headers |
+| CVE-2025-22228 | spring-security-crypto | BCrypt compares only the first 72 bytes of a password | Passwords are BCrypt hashes, so it concerns only passwords longer than 72 bytes: a real but small risk until the migration |
 
 ## 6. How It Is Built
 
