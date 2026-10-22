@@ -43,7 +43,7 @@
 set -uo pipefail
 umask 077
 
-EXPECTED_BRANCHES=(main manual-setup ansible docker docker-load-balancer terraform jenkins)
+EXPECTED_BRANCHES=(main manual-setup ansible docker docker-load-balancer terraform jenkins artifact-management security-scanning code-inspection monitoring)
 PARTS=(history files app image runtime)
 APP_IMAGES=(travelagency:latest travelagency:local)   # Jenkins tags :latest, Compose and Terraform build :local
 NGINX_IMAGE="nginx:1.28-alpine"
@@ -691,12 +691,17 @@ DB_PORTS = ("3306", "33060", "5432", "6379", "27017")
 RISKY_MOUNTS = {"/": "FAIL", "/etc": "WARN", "/root": "WARN", "/home": "WARN", "/var/run": "WARN", "/run": "WARN",
                 "/var/lib/docker": "WARN", "/proc": "WARN", "/sys": "WARN", "/dev": "WARN", "/boot": "WARN"}
 
-def mount_findings(name, source):
+def mount_findings(name, source, read_only=False):
     source = str(source).rstrip("/") or "/"
     if source.endswith("docker.sock"):
         return [("WARN", f"{name}: has the Docker socket, so it controls Docker on the host (same as root); acceptable for a lab Jenkins, not for production")]
+    if source in ("/var/run", "/run"):
+        return [("WARN", f"{name}: the host folder {source} is mounted; it holds the Docker socket, so the container controls Docker on the host (same as root)")]
     if source in RISKY_MOUNTS:
-        return [(RISKY_MOUNTS[source], f"{name}: the host folder {source} is mounted into the container")]
+        # A read-only view of the whole host (monitoring agents need one) can read, but not change, every file
+        level = "WARN" if source == "/" and read_only else RISKY_MOUNTS[source]
+        mode = "read-only" if read_only else "writable"
+        return [(level, f"{name}: the host folder {source} is mounted into the container ({mode})")]
     return []
 
 def compose_checks(path, label):
@@ -720,7 +725,7 @@ def compose_checks(path, label):
                 report("WARN", f"{name}: security_opt {opt} turns off a protection")
         for vol in svc.get("volumes") or []:
             if vol.get("type", "bind") == "bind":
-                for level, msg in mount_findings(name, vol.get("source", "")):
+                for level, msg in mount_findings(name, vol.get("source", ""), bool(vol.get("read_only"))):
                     report(level, msg)
         for p in svc.get("ports") or []:
             target, pub, ip = str(p.get("target")), str(p.get("published", "")), p.get("host_ip") or ""
@@ -825,7 +830,7 @@ def container_checks(path, app_ids):
             report("FAIL", f"{name}: the application runs as root")
         for m in c.get("Mounts") or []:
             if m.get("Type", "bind") == "bind":
-                for level, msg in mount_findings(name, m.get("Source", "")):
+                for level, msg in mount_findings(name, m.get("Source", ""), not m.get("RW", True)):
                     report(level, msg)
         if not problems:
             out("PASS", topic, f"{name}: {health or state.get('Status', '?')}, user {user or 'image default'}, not privileged, no open database port")
