@@ -1,5 +1,6 @@
-// CI/CD for TravelAgency with security scans and artifact management in Nexus:
-//   build the image (Maven + tests inside the Docker build) -> scan the dependencies (Snyk) and the image
+// CI/CD for TravelAgency with code inspection, security scans and artifact management in Nexus:
+//   build the image (Maven + unit tests inside the Docker build) -> code inspection in SonarQube with its
+//   quality gate -> scan the dependencies (Snyk) and the image
 //   (Trivy, Grype) -> security gate -> publish the WAR, its SBOM and the image to Nexus ->
 //   pull the image back from Nexus -> check the Terraform code -> deploy with Terraform (MySQL, N Tomcats,
 //   Nginx) -> smoke-test through the load balancer -> keep the newest versions in Nexus.
@@ -52,6 +53,9 @@ pipeline {
         NEXUS_KEEP          = '5'
         // The security gate stops the build on a vulnerability of this severity or higher that has a fix
         SCAN_FAIL_ON        = 'CRITICAL'
+        // SonarQube (sonarqube/docker-compose.yml), published on the host
+        SONAR_HOST_URL      = 'http://host.docker.internal:9000'
+        SONAR_MAVEN_PLUGIN  = 'org.sonarsource.scanner.maven:sonar-maven-plugin:5.8.0.7211'
     }
 
     stages {
@@ -87,6 +91,26 @@ pipeline {
                 // (the project has none yet; new ones in src/test run here), WAR
                 // --provenance=false: an unchanged app keeps the same image ID, so Terraform does not restart it
                 sh 'docker build --provenance=false -t "$IMAGE" -t travelagency:latest .'
+            }
+        }
+
+        stage('Code inspection: SonarQube') {
+            when { environment name: 'ROLLBACK', value: 'false' }
+            steps {
+                // mvn clean verify: compile, unit tests, JaCoCo coverage; then the analysis. qualitygate.wait makes
+                // Maven wait for the quality gate of SonarQube and fail the build when the gate fails
+                withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                    sh '''
+                        mvn -B -ntp clean verify "$SONAR_MAVEN_PLUGIN:sonar" \
+                            -Dsonar.host.url="$SONAR_HOST_URL" \
+                            -Dsonar.qualitygate.wait=true -Dsonar.qualitygate.timeout=300
+                    '''
+                }
+            }
+            post {
+                always {
+                    junit testResults: 'target/surefire-reports/*.xml', allowEmptyResults: true
+                }
             }
         }
 

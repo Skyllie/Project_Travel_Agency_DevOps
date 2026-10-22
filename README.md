@@ -1,154 +1,168 @@
-# TravelAgency — Scanning Images and Dependencies in CI/CD
+# TravelAgency — Continuous Code Inspection with SonarQube
 
-This branch adds security scans to the Jenkins pipeline: **Snyk** checks the Maven dependencies (SCA), **Trivy** and **Grype** check the Docker image.
-A security gate stops the build before anything vulnerable is published to Nexus or deployed.
-It covers the card "Scanning images and dependencies in CI/CD".
-It builds on the `artifact-management` branch: the same pipeline (Nexus, rollback, retention), with four new stages.
+This branch adds **continuous code inspection**: every commit is analysed by **SonarQube**, and its quality gate decides whether the build goes on.
+The project gets its first unit tests (JUnit 5, Mockito) and test coverage (JaCoCo), which SonarQube shows next to bugs, vulnerabilities, security hotspots, code smells and duplications.
+It covers the card "Implement CCI (Continuous Code Inspection)".
+It builds on the `security-scanning` branch: the same pipeline (scans, Nexus, rollback), with one new stage.
 
 ```
-git push (branch security-scanning)
+git push (branch code-inspection)
    │  Jenkins checks the branch every 5 minutes (pollSCM)
    ▼
 Jenkins  (http://<Ubuntu IP>:8081)
-    1. Version              tag = short commit id
-    2. Build and test       docker build: Maven, tests, WAR, image
-    3. Dependencies: Snyk   SCA: every library of pom.xml with its dependencies; snapshot to app.snyk.io
-    4. Image: Trivy         Ubuntu packages of the image, the jars in the WAR; SBOM of the image
-    5. Image: Grype         the same image against a second vulnerability database
-    6. Security gate        stop on a CRITICAL vulnerability that has a fix (accepted risks excepted)
-    7. Publish to Nexus     WAR + SBOM → travelagency-maven, image → travelagency-docker
-    8. Pull from Nexus
-    9. Terraform check
-   10. Deploy
-   11. Smoke test
-   12. Nexus retention
+    1. Version
+    2. Build and test                 docker build: Maven compiles and runs the unit tests, WAR, image
+    3. Code inspection: SonarQube     mvn verify (tests + JaCoCo coverage) → analysis → wait for the quality gate
+    4. Dependencies: Snyk
+    5. Image: Trivy
+    6. Image: Grype
+    7. Security gate
+    8. Publish to Nexus … 13. Nexus retention   (as before)
+   │
+   ▼
+SonarQube Community Build + PostgreSQL  (containers, http://<Ubuntu IP>:9000)
+   project travelagency: issues, coverage, duplications, history of every analysis
 ```
 
 | File | What it is |
 | --- | --- |
-| `ci/scan.sh` | The scans and the gate: `snyk`, `trivy`, `grype`, `gate` |
-| `ci/accepted-risks.txt` | Vulnerabilities the gate lets pass, each with a reason and an end date |
-| `Jenkinsfile` | 12 stages; `SCAN_FAIL_ON = 'CRITICAL'`; reports on the build page |
-| `jenkins/Dockerfile` | Adds Trivy, Grype, Snyk CLI and Maven, each checked against a pinned checksum |
-| `jenkins/plugins.txt` | Adds Warnings (`warnings-ng`): the scanner results as pages of the build |
-| `jenkins/casc.yaml` | New credential `snyk-token` |
-| `ci/nexus.sh` | Uploads the SBOM next to the WAR |
-| `pom.xml` | Libraries upgraded after the first scan (section 4) |
+| `sonarqube/docker-compose.yml` | SonarQube Community Build 26.9 and PostgreSQL 17, UI on port 9000 |
+| `sonarqube/.env.example` | Database password and the admin password |
+| `sonarqube/setup.py` | Configures SonarQube through its Web API: admin password, login required, private project, token for Jenkins. Safe to run again |
+| `Jenkinsfile` | New stage Code inspection: SonarQube; test results on the build page |
+| `pom.xml` | JUnit 5, Mockito, Surefire, JaCoCo; SonarQube project key |
+| `src/test/java/…` | First unit tests: `CountryServiceImpl`, `BookingServiceImpl`, `StringToLocalDateConverter` |
+| `jenkins/casc.yaml`, `jenkins/plugins.txt` | Credential `sonar-token`; plugin JUnit |
 
-| Scanner | What it scans | Database |
-| --- | --- | --- |
-| Snyk Open Source | `pom.xml`: Snyk runs Maven and checks the whole dependency tree, direct and transitive | Snyk Vulnerability Database |
-| Trivy | The built image: Ubuntu packages, the JDK, the jars inside `ROOT.war` | Trivy DB (NVD, GitHub advisories, Ubuntu) + Trivy Java DB |
-| Grype | The same image | Anchore Grype DB |
+## What SonarQube Checks
 
-Two image scanners on purpose: their databases and matching differ, so each finds things the other misses.
+SonarQube reads the Java code, the compiled classes and the coverage report, and finds:
+
+| Kind | Example |
+| --- | --- |
+| Bugs (reliability) | code that is wrong or will break at run time |
+| Vulnerabilities (security) | code an attacker can use |
+| Security hotspots | security-sensitive code a person has to review, e.g. CSRF protection turned off |
+| Code smells (maintainability) | code that is hard to change: duplication, complexity, unused code |
+| Coverage | which lines the unit tests run (JaCoCo) |
+| Duplications | copied blocks of code |
+
+**Quality gate.** The project uses SonarQube's built-in gate "Sonar way". It looks only at **new code** ("Clean as You Code"): the old code is reported, but it does not block. A build fails when the new code has:
+- any new issue,
+- test coverage below 80 %,
+- more than 3 % duplicated lines,
+- a security hotspot nobody has reviewed.
+
+The first analysis has no new code, so it sets the baseline; every later commit is measured against it.
 
 ## 1. Before You Start
 
-- The `artifact-management` branch works: Nexus is set up, Jenkins publishes and deploys (README of that branch).
-- **Snyk token.** Sign up at <https://app.snyk.io> (the free plan is enough; signing in with GitHub works). Then Account settings → General → Auth Token → click to show, and copy it.
-- Disk: about 2 GB more. The Jenkins image grows by about 300 MB (scanners, Maven), and the vulnerability databases are cached in `jenkins_home` (about 1 GB, downloaded by the first build).
+- The `security-scanning` branch works (README of that branch).
+- **Memory.** SonarQube runs three Java processes (web, compute engine, Elasticsearch): about 2 GB. Together with Jenkins, Nexus, MySQL and three Tomcats, 8 GB of RAM is tight. Better: give the VM 10–12 GB. With 8 GB: check that Ubuntu has swap (`swapon --show`; if empty, the commands below add 4 GB) and deploy with `APP_REPLICAS=2`.
+  ```bash
+  sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+  echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+  ```
+- **Kernel setting for Elasticsearch** (once; without it SonarQube stops at start):
+  ```bash
+  echo "vm.max_map_count=524288" | sudo tee /etc/sysctl.d/99-sonarqube.conf
+  sudo sysctl --system
+  ```
 
-## 2. Switch Jenkins to This Branch
+## 2. Start SonarQube
 
 ```bash
 cd ~/travel-jenkins
 git fetch origin
-git switch security-scanning
-cd jenkins
+git switch code-inspection
+cd sonarqube
+cp .env.example .env
+nano .env                     # SONAR_DB_PASSWORD, SONAR_ADMIN_PASSWORD (12+ characters, A-z, digit, special)
+docker compose up -d
+docker compose ps             # wait for sonarqube (healthy): 2–3 minutes
+python3 setup.py
+```
+
+What `setup.py` prints:
+
+```
+Waiting for SonarQube at http://localhost:9000 .... up
+admin password: set from .env (the default admin/admin no longer works)
+login required: switched on
+project travelagency: created (private)
+quality gate of travelagency: Sonar way
+token jenkins-travelagency: created; it can only analyse travelagency
+...
+Put this line into jenkins/.env (it is shown only now), then "docker compose up -d" in jenkins/:
+SONAR_TOKEN=<the token>
+```
+
+The token is shown once. If it is lost: `python3 setup.py --new-token` revokes it and makes a new one.
+
+## 3. Switch Jenkins to This Branch
+
+```bash
+cd ~/travel-jenkins/jenkins
 nano .env
-#   REPO_BRANCH=security-scanning
-#   SNYK_TOKEN=<the token from app.snyk.io>
-docker compose up -d --build    # 5–10 minutes: Maven, Trivy, Grype, Snyk CLI, the Warnings plugin
-docker compose exec jenkins sh -c 'mvn -v | head -1; trivy --version | head -1; grype version | head -2; snyk --version'
+#   REPO_BRANCH=code-inspection
+#   SONAR_TOKEN=<the token>   (the line from setup.py)
+docker compose up -d --build   # adds the JUnit plugin and the credential sonar-token
 ```
 
-## 3. Run and Read the Results
+## 4. Run and Read the Results
 
-**travelagency → Build with Parameters → Build.** The first build takes longer: Snyk lets Maven download the dependencies once, Trivy and Grype download their databases.
+**travelagency → Build with Parameters → Build** (with 8 GB of RAM: `APP_REPLICAS` = 2).
 
-Where the results are:
-- **Console Output**, stage Security gate: the decision. Its form (the lines are an illustration):
-  ```
-  Security gate: no CRITICAL or higher vulnerability that already has a fix
-    snyk     0
-    trivy    1
-             CRITICAL CVE-2022-22965 org.springframework:spring-beans 5.3.9 -> 5.2.20.RELEASE, 5.3.18
-    grype    1
-             ...
-  ERROR: 2 findings above: upgrade the packages to the versions after '->' (pom.xml or the base image)
-  ```
-- **Build page → Snyk / Trivy / Grype** (left menu, Warnings plugin): every finding of every severity, with filters by severity and package, and the trend over builds.
-- **Build page → Build Artifacts → reports/**: `snyk.txt`, `trivy.txt`, `grype.txt` (tables of what was found), the full JSON reports, `snyk.sarif` and `sbom.cdx.json`.
-- **app.snyk.io → Projects → travelagency**: the dependency tree from the last build (`snyk monitor`); Snyk e-mails when a new vulnerability appears in it.
+- **Console Output**, stage Code inspection: the tests (`Tests run: 9, Failures: 0`), then the analysis and `QUALITY GATE STATUS: PASSED` (or `FAILED` with a link).
+- **Build page → Test Result**: the unit tests of this build and their trend.
+- **SonarQube** `http://<Ubuntu IP>:9000/dashboard?id=travelagency` (sign in as admin):
+  - Overview: the quality gate, new and overall issues, coverage, duplications;
+  - Issues: every finding with the line of code and why it is a problem;
+  - Security Hotspots: findings to review, e.g. the disabled CSRF protection in `WebSecurityConfig`;
+  - Activity: how the numbers change from commit to commit.
 
-The gate counts only vulnerabilities of `SCAN_FAIL_ON` (CRITICAL) or higher that already have a fixed version: those can be fixed now, so they block. Everything else is in the reports.
+## 5. When the Quality Gate Fails
 
-## 4. When the Gate Stops the Build
+The build stops at Code inspection; nothing is scanned, published or deployed. The log ends with the link to the project page, which shows the failed conditions.
 
-The gate prints each blocking finding as `severity id package installed-version -> fixed-version`. Fix it, commit, push; the next build checks again.
-
-| Where the package is | How to fix |
+| Failed condition | What to do |
 | --- | --- |
-| A library in `pom.xml` (Snyk; Trivy and Grype show the jar in `ROOT.war`) | Raise its version to the one after `->`. For a transitive library, raise the library that brings it (Snyk shows the path), or pin it in `<dependencyManagement>` |
-| An Ubuntu package or the JDK of the base image (Trivy, Grype) | Get the newest base image: `docker pull tomcat:9.0-jdk17-temurin-noble` on Ubuntu, then build again |
-| No fixed version you can use | Add it to `ci/accepted-risks.txt` with the reason and an end date (section 5) |
-
-The original libraries of the project have known critical vulnerabilities, for example Spring Framework 5.3.9 (CVE-2022-22965, "Spring4Shell", remote code execution in exactly this setup: Spring MVC as a WAR on Tomcat with JDK 9+) and Spring Security 5.6.0 (CVE-2022-22978, authorization bypass). So the first commit of this branch, which adds only the scans, stops at the gate.
-The second commit raises them to the last open-source releases of the same lines (Spring Framework 5.3.39, Spring Security 5.8.16, MySQL Connector/J 8.4.0, Hibernate 5.6.15, Logback 1.2.13), removes the unused Thymeleaf and Jetty libraries and the duplicate declarations in `pom.xml`, and switches the JDBC driver class to `com.mysql.cj.jdbc.Driver`. The four critical vulnerabilities left have no open-source fix in Spring 5; they are accepted with a reason (section 5).
-
-## 5. Accepted Risks
-
-`ci/accepted-risks.txt`, one vulnerability per line:
-
-```
-<ID> <until YYYY-MM-DD> <why it is accepted and what will remove it>
-```
-
-- The ID can be a CVE, a GitHub advisory (GHSA) or a Snyk id; the gate matches it against all ids each scanner gives, so one line covers all three scanners.
-- The scanners still report it; only the gate lets it pass, and prints `(accepted: ci/accepted-risks.txt)` next to it.
-- After the date the gate blocks it again, so an accepted risk is looked at again instead of being forgotten.
-- Every line is a decision in Git: who accepted what, when and why.
-
-Accepted now, all until 2027-04-30. Their open-source fixes are only in Spring 6 or 7, which need Jakarta EE and Tomcat 10: a migration of the whole application. The 5.x fixes are sold as Enterprise Support only.
-
-| ID | Library | What it is | Why TravelAgency can live with it for now |
-| --- | --- | --- | --- |
-| CVE-2016-1000027 | spring-web | Java deserialization in `HttpInvokerServiceExporter` | No HTTP Invoker, no Java deserialization |
-| CVE-2026-47884 | spring-webmvc | SSRF and remote code execution through `XsltView` with a `"/**"` mapping | Views are JSP only; no `XsltView`, no `"/**"` view mapping |
-| CVE-2026-22732 | spring-security-web | Security headers are not written when the application sets such headers itself | The application neither configures nor sets response headers |
-| CVE-2025-22228 | spring-security-crypto | BCrypt compares only the first 72 bytes of a password | Passwords are BCrypt hashes, so it concerns only passwords longer than 72 bytes: a real but small risk until the migration |
+| New issues | Open Issues → New code, fix them, commit. A false positive can be marked "Accept" or "False positive" in SonarQube (with a comment) |
+| Coverage on new code < 80 % | Add unit tests for the new code in `src/test/java` |
+| Duplicated lines on new code > 3 % | Move the copied code into one method or class |
+| Security hotspots not reviewed | Security Hotspots → review each: "Safe" (with a reason) or "Fixed" after changing the code |
 
 ## 6. How It Is Built
 
-- **Scan before publish.** The scans run after the build and before Publish to Nexus. A build that fails the gate leaves nothing in Nexus and changes nothing on the servers.
-- **Scans collect, the gate decides.** The three scan stages only write reports, so a build always shows all three results; the stage Security gate then decides once, with one rule for all scanners.
-- **Fail closed.** If a scanner cannot run (no network, bad token), its stage fails and so does the build: a scan that did not happen never counts as clean.
-- **Tools as code.** Trivy, Grype, Snyk CLI and Maven are installed in the Jenkins image at fixed versions and checked against pinned SHA-256/SHA-512 sums. Their databases are cached in `jenkins_home` and refreshed by the scanners themselves.
-- **Secrets.** The Snyk token is the Jenkins credential `snyk-token`, from `jenkins/.env` through JCasC; Jenkins masks it in the log.
-- **SBOM.** Trivy writes a CycloneDX list of every package in the image (`reports/sbom.cdx.json`). It is archived with the build and uploaded to Nexus next to the WAR as `TravelAgency-<version>-cyclonedx.json`, so for any stored version it is known what is inside.
-- **Old reports never count.** The stage Version deletes `reports/` first, so the gate reads only the reports of this build.
-- **Rollback** (`ROLLBACK_TO`) skips the scans: the version in Nexus passed the gate when it was built.
+- **Analysis in the pipeline, gate in the pipeline.** Maven runs `verify` (tests and coverage) and the SonarQube scanner in one call; `sonar.qualitygate.wait=true` makes the scanner wait until SonarQube has processed the analysis and fail when the gate fails. No webhook or extra Jenkins plugin is needed.
+- **Order of the stages.** Code inspection comes right after the build: code that does not pass the gate is not scanned, published or deployed.
+- **Tests run twice, for two reasons.** Inside the Docker build (a failing test stops the image) and in Code inspection (coverage for SonarQube). The Docker build stays independent of Jenkins.
+- **SonarQube as code.** `docker-compose.yml` fixes the versions; `setup.py` sets the admin password, requires a login for everything, creates the project as private and makes a token of type "project analysis": it can only send analyses of `travelagency`, nothing else.
+- **Secrets.** The token is the Jenkins credential `sonar-token`, passed to the scanner as the environment variable `SONAR_TOKEN` (not on the command line), masked in the log. The database and admin passwords stay in `sonarqube/.env`.
+- **Memory.** The heaps of the three SonarQube processes are limited in `docker-compose.yml` (512 MB each).
+- **Community Build.** Free; it analyses one branch per project (the main one), which is what this pipeline sends.
 
 ## 7. Check
 
 | What | How | Expected |
 | --- | --- | --- |
-| Scanners in Jenkins | the `docker compose exec` line of section 2 | Maven 3.9.16, Trivy 0.75.0, Grype 0.120.1, Snyk 1.1307.4 |
-| The gate stops a vulnerable build | the build of the first commit of this branch (old libraries) | red at Security gate; Publish, Deploy not run; Nexus unchanged |
-| The gate passes | a build after the upgrade | green; `Passed` in the Security gate log |
-| Reports | build page | Snyk, Trivy, Grype pages; `reports/` in Build Artifacts |
-| SBOM in Nexus | Browse → `travelagency-maven` → `…/1.0-<commit>/` | `TravelAgency-1.0-<commit>-cyclonedx.json` |
-| Snyk project | app.snyk.io → Projects | `travelagency`, tested at the time of the build |
+| SonarQube is up | `docker compose ps` in `sonarqube/` | sonarqube and db `(healthy)` |
+| Configuration is code | `python3 setup.py` again | only `already set` / `exists`, nothing created |
+| No anonymous access | open `http://<Ubuntu IP>:9000/` in a private window | the login page |
+| Tests run in the build | Console Output, Build and test / Code inspection | `Tests run: 9, Failures: 0` |
+| Analysis | SonarQube → travelagency | issues, coverage above 0 % |
+| Quality gate in Jenkins | Console Output | `QUALITY GATE STATUS: PASSED` |
+| The gate stops a bad commit | commit new code without tests, push | red at Code inspection, `FAILED`; later stages not run |
 
 ## 8. If Something Goes Wrong
 
 | Problem | What to do |
 | --- | --- |
-| `SNYK_TOKEN is not set` / `Authentication error` | Put the token into `jenkins/.env` (`SNYK_TOKEN=`), `docker compose up -d` in `jenkins/` |
-| `snyk test could not run (exit code 2)` | Look above it in the log: usually Maven could not resolve `pom.xml` or Snyk is unreachable |
-| Trivy or Grype: database download fails | Network or rate limit: build again later; the databases are cached after the first success |
-| `reports/… is missing: the … scan did not run` | A scan stage failed or was skipped; the gate never passes without all three reports |
-| The gate blocks a package with no fixed version you can use | Section 5: accept it with a reason and an end date |
-| `ci/accepted-risks.txt: '…' must be: <ID> <YYYY-MM-DD> <reason>` | Fix that line: three fields, a date like `2027-04-30` |
-| Build timeout on the first run | The databases are large; build again: they are already partly cached |
+| SonarQube restarts, log: `max virtual memory areas vm.max_map_count [65530] is too low` | Section 1, the kernel setting |
+| SonarQube or other containers get killed, `dmesg` shows "Out of memory" | Section 1: more RAM, swap, `APP_REPLICAS=2` |
+| `setup.py`: `accepts neither SONAR_ADMIN_PASSWORD nor the default admin/admin` | The password was changed in the UI: write the current one into `.env` |
+| `setup.py`: `must have at least 12 characters…` | SonarQube's password rule: make the password stronger |
+| Code inspection: `Not authorized` / `401` | `SONAR_TOKEN` in `jenkins/.env` is wrong or revoked: `python3 setup.py --new-token`, update `.env`, `docker compose up -d` in `jenkins/` |
+| Code inspection: `Connection refused` to `host.docker.internal:9000` | SonarQube is down: `docker compose ps` in `sonarqube/` |
+| `QUALITY GATE STATUS: FAILED` | Section 5 |
+| `Timeout` waiting for the quality gate | SonarQube is slow (memory); run the build again |

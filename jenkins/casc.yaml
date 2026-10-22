@@ -40,6 +40,11 @@ credentials:
               id: "snyk-token"
               secret: "${SNYK_TOKEN}"
               description: "Snyk: API token for snyk test / snyk monitor"
+          - string:
+              scope: GLOBAL
+              id: "sonar-token"
+              secret: "${SONAR_TOKEN}"
+              description: "SonarQube: analysis token of the project travelagency (sonarqube/setup.py)"
 
 unclassified:
   location:
@@ -51,7 +56,7 @@ unclassified:
 jobs:
   - script: |
       pipelineJob('travelagency') {
-        description('Build the image, scan it and its dependencies (Snyk, Trivy, Grype), publish the WAR and the image to Nexus, deploy the image from Nexus with Terraform, smoke-test the load balancer. Jenkinsfile: branch ${REPO_BRANCH}')
+        description('Build the image, inspect the code in SonarQube, scan the image and its dependencies (Snyk, Trivy, Grype), publish the WAR and the image to Nexus, deploy the image from Nexus with Terraform, smoke-test the load balancer. Jenkinsfile: branch ${REPO_BRANCH}')
         parameters {
           choiceParam('LB_ALGORITHM', ['round_robin', 'weighted', 'least_conn', 'ip_hash', 'hash', 'random', 'backup'], 'Nginx load-balancing algorithm')
           choiceParam('APP_REPLICAS', ['3', '2', '1', '4', '5'], 'Number of application servers')

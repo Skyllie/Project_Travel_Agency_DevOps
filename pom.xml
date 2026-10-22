@@ -16,6 +16,9 @@
         <spring-security.version>5.8.16</spring-security.version>
         <maven.compiler.source>11</maven.compiler.source>
         <maven.compiler.target>11</maven.compiler.target>
+        <!-- SonarQube project (sonarqube/setup.py creates it); the server and the token come from Jenkins -->
+        <sonar.projectKey>travelagency</sonar.projectKey>
+        <sonar.projectName>TravelAgency</sonar.projectName>
 
     </properties>
 
@@ -92,10 +95,17 @@
             <scope>provided</scope>
         </dependency>
 
+        <!-- Unit tests: JUnit 5 and Mockito -->
         <dependency>
-            <groupId>junit</groupId>
-            <artifactId>junit</artifactId>
-            <version>3.8.1</version>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.14.4</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-junit-jupiter</artifactId>
+            <version>5.24.0</version>
             <scope>test</scope>
         </dependency>
 
@@ -169,6 +179,34 @@
                     <source>16</source>
                     <target>16</target>
                 </configuration>
+            </plugin>
+
+            <!-- Runs the JUnit 5 tests in "mvn package" (also inside the Docker build) -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.6</version>
+            </plugin>
+
+            <!-- Test coverage for SonarQube: target/site/jacoco/jacoco.xml after "mvn verify" -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>0.8.15</version>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
 
             <!-- Maven War Plugin -->

@@ -10,6 +10,7 @@ jenkins
 nexus
 ci
 reports
+sonarqube
 *.md
 LICENSE
 docker-compose.yml
