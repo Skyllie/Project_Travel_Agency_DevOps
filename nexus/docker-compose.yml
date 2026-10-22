@@ -1,0 +1,37 @@
+# Nexus Repository (Community Edition): stores the WAR (Maven repository) and the image (Docker registry).
+#   cd nexus
+#   cp .env.example .env && nano .env
+#   docker compose up -d          # 2–3 minutes until healthy
+#   python3 setup.py              # repositories, the Jenkins user, security settings
+#   http://<Ubuntu IP>:8091/
+
+name: nexus
+
+services:
+  nexus:
+    image: sonatype/nexus3:3.96.4
+    restart: unless-stopped
+    ports:
+      # Web UI and REST API
+      - "8091:8081"
+      # Docker registry of the repository travelagency-docker. Plain HTTP, so it is published
+      # only on 127.0.0.1: the Docker daemon of this machine pushes and pulls, nobody else
+      - "127.0.0.1:8092:8082"
+    environment:
+      # 1 GB heap is enough for one project; the default takes a quarter of the VM memory
+      INSTALL4J_ADD_VM_PARAMS: "-Xms1g -Xmx1g -XX:MaxDirectMemorySize=1g -Djava.util.prefs.userRoot=/nexus-data/javaprefs"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - nexus_data:/nexus-data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8081/service/rest/v1/status/writable"]
+      interval: 15s
+      timeout: 5s
+      start_period: 180s
+      retries: 10
+
+volumes:
+  nexus_data:

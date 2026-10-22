@@ -1,130 +1,189 @@
-# TravelAgency — CI/CD with Jenkins
+# TravelAgency — Artifact Management with Nexus
 
-This branch adds a **Jenkins** pipeline that builds, tests and deploys TravelAgency on every new commit.
-It covers the card "Implement a Continuous Integration/Continuous Delivery".
-It builds on the `terraform` branch: Jenkins builds the image and deploys it with the same Terraform code.
+This branch keeps every build of TravelAgency in a **Nexus Repository**: the WAR in a Maven repository and the Docker image in a Docker registry.
+Jenkins deploys only what is stored in Nexus, and any stored version can be deployed again (rollback).
+It covers the card "Artifact Management".
+It builds on the `jenkins` branch: the same pipeline, with three new stages.
 
 ```
-git push (branch jenkins)
+git push (branch artifact-management)
    │  Jenkins checks the branch every 5 minutes (pollSCM)
    ▼
-Jenkins  (container, http://<Ubuntu IP>:8081, configured as code)
-   1. Version          image tag = short commit id, e.g. travelagency:3f2a9c1
-   2. Build and test   docker build: Maven compiles, runs unit tests (none yet), packs the WAR
-   3. Terraform check  terraform fmt -check, init, validate
-   4. Deploy           terraform plan + apply with the new tag → MySQL, N Tomcats, Nginx
-   5. Smoke test       HTTP 200 through the load balancer, which servers answered
+Jenkins  (http://<Ubuntu IP>:8081)
+   1. Version            tag = short commit id, e.g. 3f2a9c1
+   2. Build and test     docker build: Maven compiles, runs unit tests, packs the WAR into the image
+   3. Publish to Nexus   WAR   → travelagency-maven   org.project:TravelAgency:1.0-3f2a9c1
+                         image → travelagency-docker  localhost:8092/travelagency:3f2a9c1
+   4. Pull from Nexus    docker pull of that image: the deploy uses the copy stored in Nexus
+   5. Terraform check    terraform fmt -check, init, validate
+   6. Deploy             terraform apply: MySQL, N Tomcats with the image from Nexus, Nginx
+   7. Smoke test         HTTP 200 through the load balancer
+   8. Nexus retention    keep the 5 newest versions in each repository
    │
-   ▼  through /var/run/docker.sock
-Docker on Ubuntu:  travelagency-tf-db, -app1…N, -lb  →  http://<Ubuntu IP>/
+   ▼
+Nexus Repository Community Edition  (container, http://<Ubuntu IP>:8091)
+   travelagency-maven    WARs, one release per commit, never overwritten
+   travelagency-docker   images, one tag per commit, never overwritten; registry on 127.0.0.1:8092
 ```
 
 | File | What it is |
 | --- | --- |
-| `Jenkinsfile` | The pipeline: 5 stages, parameters, poll trigger, image cleanup |
-| `jenkins/Dockerfile` | Jenkins LTS (JDK 21) + Docker CLI + Terraform + plugins |
-| `jenkins/plugins.txt` | Plugins installed at build time |
-| `jenkins/casc.yaml` | Configuration as code: admin user, credentials, the `travelagency` job |
-| `jenkins/docker-compose.yml` | Runs Jenkins on port 8081 with access to the host Docker |
-| `jenkins/.env.example` | Admin password, database passwords, repository, Docker group id |
+| `nexus/docker-compose.yml` | Nexus 3.96.4: UI and REST API on port 8091, the Docker registry on `127.0.0.1:8092` |
+| `nexus/.env.example` | The admin password, the user Jenkins publishes with, accepting the EULA |
+| `nexus/setup.py` | Configures Nexus through its REST API: repositories, role, user, security. Safe to run again |
+| `ci/nexus.sh` | The Nexus steps of the pipeline: `publish`, `pull`, `retention` |
+| `Jenkinsfile` | 8 stages; new parameter `ROLLBACK_TO` |
+| `jenkins/casc.yaml` | New credential `nexus-ci` and the parameter `ROLLBACK_TO` |
+| `jenkins/Dockerfile` | Adds `jq` for reading the Nexus API answers |
 
-Nothing is configured by hand in the Jenkins UI: after `docker compose up` the job, the credentials and the admin user already exist.
+| Repository | Format | Stores | Version | Write policy |
+| --- | --- | --- | --- | --- |
+| `travelagency-maven` | Maven 2, hosted, release | WAR + generated POM + checksums | `1.0-<commit>` | Allow once: a version cannot be overwritten |
+| `travelagency-docker` | Docker, hosted | Application image | `<commit>` | Allow once: a tag always points to the same image |
 
 ## 1. Before You Start
 
-- Docker on Ubuntu (README of the `docker` branch). Terraform on Ubuntu is not needed: it is inside the Jenkins image.
-- Stop the earlier stacks, they use the same ports and names:
-  - `docker compose down` in the folders of the `docker` and `docker-load-balancer` branches;
-  - `terraform destroy` in the folder of the `terraform` branch, if you created the stack by hand. From now on Jenkins owns it.
-- RAM: Jenkins needs about 1 GB on top of the three Tomcats and MySQL. Give the Ubuntu VM 6 GB (shut down `ol-app` and `ol-db` with `vagrant halt`).
+- Jenkins from the `jenkins` branch is running (`~/travel-jenkins`, README of that branch). Section 3 switches it to this branch.
+- **RAM: give the Ubuntu VM 8 GB.** Shut Ubuntu down, then in VMware: VM → Settings → Memory → 8192 MB, and start it again. Roughly: Nexus 1.5 GB, Jenkins 1 GB, three Tomcats 1.5 GB, MySQL 0.5 GB, Ubuntu itself 1 GB.
+- Disk: about 2 GB free for Nexus. A new version adds only the changed image layer with the WAR; the base layers are stored once.
+- Python 3 is already on Ubuntu (`python3 --version`); `setup.py` uses only its standard library.
 
-## 2. Start Jenkins
+## 2. Start Nexus
 
 ```bash
-git clone -b jenkins https://github.com/Skyllie/Project_Travel_Agency_DevOps.git ~/travel-jenkins
-cd ~/travel-jenkins/jenkins
+cd ~/travel-jenkins
+git fetch origin
+git switch artifact-management
+cd nexus
 cp .env.example .env
-nano .env                                                  # JENKINS_ADMIN_PASSWORD and the two DB passwords
-echo "DOCKER_GID=$(getent group docker | cut -d: -f3)" >> .env
-docker compose up -d --build                               # 5–10 minutes the first time: plugins download
-docker compose logs -f jenkins                             # wait for "Jenkins is fully up and running", Ctrl+C
+nano .env                       # NEXUS_ADMIN_PASSWORD, NEXUS_CI_PASSWORD, NEXUS_ACCEPT_EULA (see below)
+docker compose up -d
+docker compose ps               # wait for (healthy): 2–3 minutes the first time
+python3 setup.py
 ```
 
-Open `http://<Ubuntu IP>:8081/` on Windows and log in as `admin` with `JENKINS_ADMIN_PASSWORD`.
-The job **travelagency** is already there.
+Nexus Community Edition is free, under the Sonatype End User License Agreement (<https://links.sonatype.com/products/nxrm/ce-eula>).
+Read it and write `NEXUS_ACCEPT_EULA=yes` into `.env` to accept it. Without that, `setup.py` sets the admin password and stops with the text of the agreement.
 
-## 3. First Run
+What `setup.py` prints:
 
-1. **travelagency → Build with Parameters → Build** (the defaults: `round_robin`, 3 servers, sticky sessions on).
-2. Watch the stages in **Pipeline Overview** or in **Console Output**. The first run takes 5–10 minutes (Maven dependencies, base images, Terraform provider).
-3. At the end of the log: the Terraform outputs and the smoke test, for example:
-   ```
-   HTTP 200 from http://host.docker.internal:80/form-login
-   15 new visitors, algorithm round_robin:
-         5 app1
-         5 app2
-         5 app3
-   ```
-4. Open `http://<Ubuntu IP>/` — the site, deployed by Jenkins.
+```
+Waiting for Nexus at http://localhost:8091  up
+admin password: set from .env (Nexus deleted the generated one)
+EULA: accepted (NEXUS_ACCEPT_EULA=yes)
+realm Docker Bearer Token: enabled
+anonymous access: switched off
+repository travelagency-maven: created
+repository travelagency-docker: created
+role travelagency-ci: created
+user jenkins: created with the role travelagency-ci
+check: jenkins can read travelagency-maven and travelagency-docker
+check: Docker registry http://localhost:8092 accepts jenkins
+```
 
-## 4. Continuous Delivery
+Open `http://<Ubuntu IP>:8091/` on Windows and sign in as `admin` with `NEXUS_ADMIN_PASSWORD`.
+If Nexus shows its welcome wizard, click through it: `setup.py` has already done its steps.
 
-Every commit to the `jenkins` branch is deployed automatically:
+## 3. Switch Jenkins to This Branch
 
 ```bash
-# in a clone of the jenkins branch
-git commit --allow-empty -m "Trigger the pipeline"     # or any real change
-git push
+cd ~/travel-jenkins/jenkins
+nano .env
+#   REPO_BRANCH=artifact-management
+#   NEXUS_CI_USER=jenkins
+#   NEXUS_CI_PASSWORD=<the same as in nexus/.env>
+docker compose up -d --build    # the image gets jq; JCasC adds the credential nexus-ci and ROLLBACK_TO
 ```
 
-Within 5 minutes Jenkins notices the commit (**Polling Log** of the job), builds the image `travelagency:<new commit id>`, and Terraform recreates the application servers with it.
+The Terraform state stays in the `jenkins_home` volume, so Jenkins takes over the running stack and recreates nothing that has not changed.
 
-**Rollback** goes the same way: `git revert <bad commit>` and `git push` — the pipeline builds and deploys the previous code. Do not run `terraform apply` by hand for this stack: Jenkins keeps its own state in `/var/jenkins_home/tfstate/`.
+Installing Jenkins for the first time: follow sections 1–2 of the `jenkins` branch README with `git clone -b artifact-management …` and fill in the `NEXUS_CI_*` lines of `jenkins/.env` as well.
 
-GitHub cannot call Jenkins on a home PC (no public address), so Jenkins asks GitHub instead (polling). With a public Jenkins, a GitHub webhook would start the build at once.
+## 4. First Build
 
-## 5. Parameters
+**travelagency → Build with Parameters → Build.** In the log:
 
-**Build with Parameters** changes the deployment without changing code:
+```
+WAR uploaded: http://host.docker.internal:8091/repository/travelagency-maven/org/project/TravelAgency/1.0-3f2a9c1/TravelAgency-1.0-3f2a9c1.war
+Image pushed: localhost:8092/travelagency:3f2a9c1
+...
+Deploying the image from Nexus: localhost:8092/travelagency@sha256:…
+...
+travelagency-maven: kept the 5 newest versions of TravelAgency and the deployed one
+travelagency-docker: kept the 5 newest versions of travelagency and the deployed one
+```
 
-| Parameter | Values | What changes |
+In Nexus, **Browse**:
+- `travelagency-maven` → `org/project/TravelAgency/1.0-3f2a9c1/`: the `.war`, the `.pom`, and their `.md5`, `.sha1`, `.sha256`, `.sha512`;
+- `travelagency-docker` → `travelagency` → `3f2a9c1`.
+
+Run the build once more without a new commit: the log says `… is already in travelagency-maven: a release is never overwritten`, and the same for the image. One commit gives exactly one WAR and one image.
+
+## 5. Rollback from Nexus
+
+1. Find an older version: Nexus → Browse → `travelagency-docker` → `travelagency`, or the build descriptions in Jenkins (`3f2a9c1, round_robin, 3 servers`).
+2. **Build with Parameters**, `ROLLBACK_TO` = that 7-character commit id → **Build**.
+3. Build and test, Publish and Retention are skipped (grey). Pull from Nexus downloads that image, Terraform puts it on the application servers, the smoke test checks the site. The build description starts with `rollback to`.
+
+Back to the newest version: **Build with Parameters** with an empty `ROLLBACK_TO`, or push a commit.
+A rollback changes only the application image; the infrastructure comes from the Terraform code of the current commit.
+
+## 6. Artifacts Outside Jenkins
+
+Download a WAR on Ubuntu (curl asks for the password of `jenkins`):
+
+```bash
+curl -u jenkins -fO http://localhost:8091/repository/travelagency-maven/org/project/TravelAgency/1.0-3f2a9c1/TravelAgency-1.0-3f2a9c1.war
+```
+
+Pull an image on Ubuntu:
+
+```bash
+docker login localhost:8092 -u jenkins
+docker pull localhost:8092/travelagency:3f2a9c1
+docker logout localhost:8092
+```
+
+The registry listens only on `127.0.0.1` of Ubuntu, because it speaks plain HTTP. The web UI and the Maven repository are on port 8091 for the whole network.
+
+## 7. How It Is Built
+
+- **Nexus as code.** `setup.py` configures Nexus through the REST API from `nexus/.env`; nothing is set up by hand. Each step reads the current state first, so a second run only reports `already set` / `checked`.
+- **Write once.** Both repositories use the write policy "Allow once": a version, once stored, never changes. `ci/nexus.sh publish` checks first and skips what is already there. The Maven repository has the release policy, so it does not accept `-SNAPSHOT` versions.
+- **Version = commit.** The WAR is `1.0-<commit>` (the release part of the version in `pom.xml` plus the commit id), the image tag is `<commit>`. The same id is in the build description and in `terraform output app_image`, so the running version leads straight to its commit.
+- **One build, two artifacts.** The WAR uploaded to Nexus is copied out of the built image (`docker create` + `docker cp`), so it is the same file Tomcat runs.
+- **Deploy from the repository.** The stage Pull from Nexus pulls `localhost:8092/travelagency:<commit>`, and Terraform runs that image. A version missing from Nexus cannot be deployed.
+- **Least privilege.** Jenkins signs in as `jenkins` with the role `travelagency-ci`: the two TravelAgency repositories and the upload API, nothing else. The admin password is only in `nexus/.env`. Anonymous access is off, and the registry asks for a login on every pull and push.
+- **Secrets.** The Jenkins credential `nexus-ci` comes from `jenkins/.env` through JCasC. `ci/nexus.sh` gives the password to curl in a temporary file and to `docker login` on stdin, with a temporary `DOCKER_CONFIG` deleted after the step: the password is not in the process list, not in the log (Jenkins masks it) and not left in `~/.docker` of Jenkins.
+- **Registry without TLS on localhost.** Docker trusts a registry on `localhost` over plain HTTP without any `insecure-registries` setting, so the registry is published only on `127.0.0.1`.
+- **Retention.** After a successful smoke test, `ci/nexus.sh retention` keeps the `NEXUS_KEEP` (5) newest versions in each repository and always the deployed one. If it fails, the stage turns yellow (UNSTABLE) and the build stays green. Deleted components free disk space after two Nexus tasks run: gear icon (administration) → System → Tasks → Create task → "Docker - Delete unused manifests and images", then "Admin - Compact blob store" (for example, weekly).
+- **Memory.** The Nexus JVM is limited to 1 GB of heap (`INSTALL4J_ADD_VM_PARAMS`); by default it would take a quarter of the VM memory.
+- **Community Edition.** Free to use; Sonatype sets usage limits for it (number of components, requests per day) far above what this project needs.
+
+## 8. Check
+
+| What | How | Expected |
 | --- | --- | --- |
-| `LB_ALGORITHM` | `round_robin`, `weighted`, `least_conn`, `ip_hash`, `hash`, `random`, `backup` | Nginx config; only the `lb` container is recreated |
-| `APP_REPLICAS` | 1–5 | Number of Tomcats; Terraform adds or removes servers |
-| `LB_STICKY` | checkbox (on by default) | Sticky sessions by `jvmRoute` |
+| Nexus is up | `docker compose ps` in `nexus/` | `(healthy)` |
+| Configuration is code | `python3 setup.py` again | only `already set` / `checked`, nothing created |
+| No anonymous access | `curl -s -o /dev/null -w '%{http_code}\n' "http://localhost:8091/service/rest/v1/components?repository=travelagency-maven"` | `401` or `403`, not `200` |
+| The registry needs a login | `curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8092/v2/` | `401` |
+| A build publishes | Console Output of a build after a new commit | `WAR uploaded`, `Image pushed` |
+| Write once | Build again without a new commit | `already in …: … never overwritten` |
+| Deploy from Nexus | Stage Pull from Nexus | `Deploying the image from Nexus: localhost:8092/travelagency@sha256:…` |
+| Rollback | `ROLLBACK_TO` = an older commit | the site works; `app_image = "localhost:8092/travelagency:<older commit>"` in the Terraform output |
+| Retention | 6 or more builds of new commits | 5 versions in each repository (plus the deployed one, if it is older) |
 
-The smoke test prints how 15 new visitors were spread; with `round_robin` it fails if not all servers answered.
-
-## 6. How It Is Built
-
-- **Jenkins as code.** `jenkins/casc.yaml` (Configuration as Code plugin) creates the admin user, two secret-text credentials and the pipeline job (Job DSL). Secrets come from `jenkins/.env` through environment variables, so the Git repository has none.
-- **Docker from Jenkins.** The host socket `/var/run/docker.sock` is mounted into the container, and the `jenkins` user is added to the host `docker` group (`DOCKER_GID`). `docker build` and Terraform inside Jenkins work with the host Docker directly. This gives Jenkins full control of the host Docker, so the Jenkins UI must stay protected by a password.
-- **Tests in the build.** The Dockerfile build stage runs `mvn package`. The project has no unit tests yet; as soon as tests are added to `src/test`, they run there, and a failing test stops the image build, so nothing is deployed. Until then the smoke test after the deploy is the check.
-- **Image tag = commit.** Each build has its own tag (`git rev-parse --short=7 HEAD`), so the running version is always known (`terraform output app_image`, build description).
-- **Terraform state** is in the `jenkins_home` volume (`/var/jenkins_home/tfstate/`), so each build changes only what is different.
-- **Secrets in the log.** The DB passwords are passed with `withCredentials` as `TF_VAR_…` variables: Jenkins masks them as `****`, and Terraform shows them as `(sensitive value)`.
-- **One build at a time** (`disableConcurrentBuilds`), 30-minute timeout, the last 15 builds kept.
-
-## 7. Check
-
-| What | Where | Expected |
-| --- | --- | --- |
-| Jenkins is up | `docker compose ps` in `jenkins/` | `Up` |
-| Configured as code | Manage Jenkins → Configuration as Code | `casc.yaml` loaded, no errors |
-| The job and credentials exist | Dashboard; Manage Jenkins → Credentials | `travelagency`; `travel-db-password`, `travel-db-root-password` |
-| A build passes | travelagency → Build Now | all five stages green |
-| The stack is running | `docker ps --filter name=travelagency-tf` | db, app1–3, lb: healthy |
-| CD works | push a commit to `jenkins` | a new build starts within 5 minutes, a new image tag in `docker ps` |
-| Docker works from Jenkins | `docker compose exec jenkins docker ps` | the host containers |
-
-## 8. If Something Goes Wrong
+## 9. If Something Goes Wrong
 
 | Problem | What to do |
 | --- | --- |
-| `permission denied ... /var/run/docker.sock` in the build | `DOCKER_GID` in `jenkins/.env` is wrong or missing: `getent group docker`, fix it, `docker compose up -d` |
-| `Conflict. The container name "/travelagency-tf-db" is already in use` | The stack was created by hand: `terraform destroy` in the `terraform` branch folder (or `docker rm -f` the `travelagency-tf-*` containers), then build again |
-| `terraform fmt -check` fails | Run `terraform fmt` in `terraform/`, commit the change |
-| Smoke test: `HTTP 000` | Port 80 is used by something else, or the `lb` container failed: `docker logs travelagency-tf-lb` |
-| `Bind for 0.0.0.0:80 failed: port is already allocated` | Another stack is running: `docker compose down` in the Compose branches |
-| The job is missing | `docker compose logs jenkins \| grep -i casc` — an error in `casc.yaml` or a missing variable in `.env` |
-| New commits do not start builds | **Polling Log** of the job: Jenkins must be able to reach GitHub; the trigger is set in `casc.yaml` and in the Jenkinsfile |
+| `setup.py`: `Nexus did not start in 10 minutes` | `docker compose logs nexus` in `nexus/`; often not enough memory: `free -h`, see section 1 |
+| `setup.py` stops with the EULA text | Read it, write `NEXUS_ACCEPT_EULA=yes` into `nexus/.env`, run `setup.py` again |
+| `setup.py`: `the generated password … is gone` | The admin password was changed in the UI: write the current one into `NEXUS_ADMIN_PASSWORD` |
+| Publish: `Nexus refused jenkins (HTTP 401)` | `NEXUS_CI_PASSWORD` differs between `jenkins/.env` and `nexus/.env`: make them equal, run `python3 setup.py` and `docker compose up -d` in `jenkins/` |
+| Publish: `Nexus answered HTTP 000` | Nexus is down or unreachable from Jenkins: `docker compose ps` in `nexus/`, `curl -I http://localhost:8091/` on Ubuntu |
+| `docker push`: `server gave HTTP response to HTTPS client` | The registry name must be `localhost:8092` (`REGISTRY` in the Jenkinsfile): Docker allows plain HTTP only for localhost |
+| `docker push`: `denied` or `unauthorized` | The role of `jenkins` is wrong: `python3 setup.py` puts it back |
+| Rollback: `manifest unknown` | That version is not in Nexus (deleted by retention or never built): Browse → `travelagency-docker` |
+| The disk fills up | Create the two cleanup tasks from section 7 and run them |

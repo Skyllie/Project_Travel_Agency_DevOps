@@ -29,22 +29,29 @@ credentials:
               id: "travel-db-root-password"
               secret: "${TRAVEL_DB_ROOT_PASSWORD}"
               description: "TravelAgency: MySQL root password"
+          - usernamePassword:
+              scope: GLOBAL
+              id: "nexus-ci"
+              username: "${NEXUS_CI_USER}"
+              password: "${NEXUS_CI_PASSWORD}"
+              description: "Nexus: the user that publishes and pulls the WAR and the image"
 
 unclassified:
   location:
     url: "${JENKINS_PUBLIC_URL}"
 
-# The pipeline job: Jenkinsfile from the jenkins branch of the repository.
+# The pipeline job: Jenkinsfile from the branch REPO_BRANCH of the repository.
 # JCasC re-creates the job at every Jenkins start, so the parameters and the poll
 # trigger are declared here too (the Jenkinsfile declares the same ones).
 jobs:
   - script: |
       pipelineJob('travelagency') {
-        description('Build the image, deploy it with Terraform, smoke-test the load balancer. Jenkinsfile: branch ${REPO_BRANCH}')
+        description('Build the image, publish the WAR and the image to Nexus, deploy the image from Nexus with Terraform, smoke-test the load balancer. Jenkinsfile: branch ${REPO_BRANCH}')
         parameters {
           choiceParam('LB_ALGORITHM', ['round_robin', 'weighted', 'least_conn', 'ip_hash', 'hash', 'random', 'backup'], 'Nginx load-balancing algorithm')
           choiceParam('APP_REPLICAS', ['3', '2', '1', '4', '5'], 'Number of application servers')
           booleanParam('LB_STICKY', true, 'Sticky sessions by the Tomcat jvmRoute in JSESSIONID')
+          stringParam('ROLLBACK_TO', '', 'Deploy a version already in Nexus (7-character commit id, e.g. 3f2a9c1) instead of building. Empty: build this commit')
         }
         properties {
           pipelineTriggers {

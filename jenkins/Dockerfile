@@ -3,9 +3,10 @@ FROM jenkins/jenkins:lts-jdk21
 
 USER root
 
-# Docker CLI + buildx: Jenkins builds images on the host Docker through the mounted socket
+# Docker CLI + buildx: Jenkins builds images on the host Docker through the mounted socket.
+# jq: ci/nexus.sh reads the answers of the Nexus REST API
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl gnupg unzip \
+ && apt-get install -y --no-install-recommends ca-certificates curl gnupg jq unzip \
  && install -m 0755 -d /etc/apt/keyrings \
  && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
  && chmod a+r /etc/apt/keyrings/docker.asc \

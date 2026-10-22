@@ -7,6 +7,8 @@ images
 lb
 terraform
 jenkins
+nexus
+ci
 *.md
 LICENSE
 docker-compose.yml

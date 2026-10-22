@@ -73,3 +73,6 @@ HELP.md
 
 # Docker / Terraform secrets
 .env
+
+# Python
+__pycache__/

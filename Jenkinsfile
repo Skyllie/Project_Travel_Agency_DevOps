@@ -1,6 +1,8 @@
-// CI/CD for TravelAgency:
-//   build the image (Maven + tests inside the Docker build) -> check the Terraform code ->
-//   deploy with Terraform (MySQL, N Tomcats, Nginx) -> smoke-test through the load balancer.
+// CI/CD for TravelAgency with artifact management in Nexus:
+//   build the image (Maven + tests inside the Docker build) -> publish the WAR and the image to Nexus ->
+//   pull the image back from Nexus -> check the Terraform code -> deploy with Terraform (MySQL, N Tomcats,
+//   Nginx) -> smoke-test through the load balancer -> keep the newest versions in Nexus.
+// ROLLBACK_TO=<commit id> skips the build and deploys a version that is already in Nexus.
 // The job is created by jenkins/casc.yaml. Jenkins checks the branch for new commits every 5 minutes.
 
 pipeline {
@@ -25,6 +27,8 @@ pipeline {
                description: 'Number of application servers')
         booleanParam(name: 'LB_STICKY', defaultValue: true,
                      description: 'Sticky sessions by the Tomcat jvmRoute in JSESSIONID')
+        string(name: 'ROLLBACK_TO', defaultValue: '', trim: true,
+               description: 'Deploy a version already in Nexus (7-character commit id, e.g. 3f2a9c1) instead of building. Empty: build this commit')
     }
 
     environment {
@@ -36,26 +40,69 @@ pipeline {
         // State and provider cache live in jenkins_home, so they survive between builds
         TF_STATE            = '/var/jenkins_home/tfstate/travelagency.tfstate'
         TF_PLUGIN_CACHE_DIR = '/var/jenkins_home/.terraform.d/plugin-cache'
+        // Nexus (nexus/docker-compose.yml): UI and REST API, published on the host
+        NEXUS_URL           = 'http://host.docker.internal:8091'
+        NEXUS_MAVEN_REPO    = 'travelagency-maven'
+        NEXUS_DOCKER_REPO   = 'travelagency-docker'
+        // Registry of travelagency-docker. The host Docker daemon pushes and pulls, so for it this is localhost
+        REGISTRY            = 'localhost:8092'
+        // How many versions stay in each Nexus repository
+        NEXUS_KEEP          = '5'
     }
 
     stages {
         stage('Version') {
             steps {
                 script {
-                    env.IMAGE_TAG = sh(script: 'git rev-parse --short=7 HEAD', returnStdout: true).trim()
+                    def rollback = (params.ROLLBACK_TO ?: '').trim()
+                    env.ROLLBACK = rollback ? 'true' : 'false'
+                    if (rollback) {
+                        env.IMAGE_TAG = rollback
+                        sh '''
+                            echo "$IMAGE_TAG" | grep -qxE '[0-9a-f]{7}' \
+                              || { echo "ROLLBACK_TO must be a 7-character commit id of a version in Nexus, e.g. 3f2a9c1, not: $IMAGE_TAG"; exit 1; }
+                        '''
+                    } else {
+                        env.IMAGE_TAG = sh(script: 'git rev-parse --short=7 HEAD', returnStdout: true).trim()
+                    }
                     env.IMAGE = "travelagency:${env.IMAGE_TAG}"
-                    currentBuild.description = "${env.IMAGE}, ${params.LB_ALGORITHM}, ${params.APP_REPLICAS} servers"
+                    env.REGISTRY_IMAGE = "${env.REGISTRY}/${env.IMAGE}"
+                    currentBuild.description = (rollback ? 'rollback to ' : '') +
+                        "${env.IMAGE_TAG}, ${params.LB_ALGORITHM}, ${params.APP_REPLICAS} servers"
                 }
-                echo "Image: ${env.IMAGE}"
+                echo "Image: ${env.REGISTRY_IMAGE}"
             }
         }
 
         stage('Build and test') {
+            when { environment name: 'ROLLBACK', value: 'false' }
             steps {
                 // The first stage of the Dockerfile runs "mvn package": compile, unit tests
                 // (the project has none yet; new ones in src/test run here), WAR
                 // --provenance=false: an unchanged app keeps the same image ID, so Terraform does not restart it
                 sh 'docker build --provenance=false -t "$IMAGE" -t travelagency:latest .'
+            }
+        }
+
+        stage('Publish to Nexus') {
+            when { environment name: 'ROLLBACK', value: 'false' }
+            steps {
+                // WAR -> travelagency-maven as org.project:TravelAgency:1.0-<commit>,
+                // image -> travelagency-docker as travelagency:<commit>. Both are write-once
+                withCredentials([usernamePassword(credentialsId: 'nexus-ci',
+                                                  usernameVariable: 'NEXUS_USER', passwordVariable: 'NEXUS_PASSWORD')]) {
+                    sh 'bash ci/nexus.sh publish'
+                }
+            }
+        }
+
+        stage('Pull from Nexus') {
+            steps {
+                // The deploy uses the image stored in Nexus, not the one left over from the build
+                withCredentials([usernamePassword(credentialsId: 'nexus-ci',
+                                                  usernameVariable: 'NEXUS_USER', passwordVariable: 'NEXUS_PASSWORD')]) {
+                    sh 'bash ci/nexus.sh pull'
+                }
             }
         }
 
@@ -79,7 +126,7 @@ pipeline {
                     string(credentialsId: 'travel-db-root-password', variable: 'TF_VAR_mysql_root_password')
                 ]) {
                     withEnv([
-                        "TF_VAR_app_image=${env.IMAGE}",
+                        "TF_VAR_app_image=${env.REGISTRY_IMAGE}",
                         "TF_VAR_app_replicas=${params.APP_REPLICAS}",
                         "TF_VAR_lb_algorithm=${params.LB_ALGORITHM}",
                         "TF_VAR_lb_sticky=${params.LB_STICKY}",
@@ -129,17 +176,32 @@ pipeline {
                 }
             }
         }
+
+        stage('Nexus retention') {
+            when { environment name: 'ROLLBACK', value: 'false' }
+            steps {
+                // Old versions are deleted only after the new one works. A failure here does not fail the build
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    withCredentials([usernamePassword(credentialsId: 'nexus-ci',
+                                                      usernameVariable: 'NEXUS_USER', passwordVariable: 'NEXUS_PASSWORD')]) {
+                        sh 'bash ci/nexus.sh retention'
+                    }
+                }
+            }
+        }
     }
 
     post {
         success {
-            echo "Deployed ${env.IMAGE}: http://<Ubuntu IP>:${env.LB_PORT}/"
+            echo "Deployed ${env.REGISTRY_IMAGE}: http://<Ubuntu IP>:${env.LB_PORT}/"
         }
         always {
-            // Keep the three newest application images (an image in use cannot be removed anyway)
+            // Keep the three newest local tags of both names, and the current one. Nexus keeps the history
             sh '''
-                docker images travelagency --format '{{.Tag}}' | grep -vxE 'latest|local' | tail -n +4 \
-                  | xargs -r -I{} docker rmi "travelagency:{}" || true
+                for repo in travelagency "$REGISTRY/travelagency"; do
+                    docker images "$repo" --format '{{.Tag}}' | grep -vxE "latest|local|${IMAGE_TAG:-none}" | tail -n +4 \
+                      | xargs -r -I{} docker rmi "$repo:{}" || true
+                done
             '''
         }
     }
