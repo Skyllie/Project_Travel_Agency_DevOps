@@ -9,6 +9,7 @@ terraform
 jenkins
 nexus
 ci
+reports
 *.md
 LICENSE
 docker-compose.yml

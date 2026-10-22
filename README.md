@@ -1,189 +1,143 @@
-# TravelAgency — Artifact Management with Nexus
+# TravelAgency — Scanning Images and Dependencies in CI/CD
 
-This branch keeps every build of TravelAgency in a **Nexus Repository**: the WAR in a Maven repository and the Docker image in a Docker registry.
-Jenkins deploys only what is stored in Nexus, and any stored version can be deployed again (rollback).
-It covers the card "Artifact Management".
-It builds on the `jenkins` branch: the same pipeline, with three new stages.
+This branch adds security scans to the Jenkins pipeline: **Snyk** checks the Maven dependencies (SCA), **Trivy** and **Grype** check the Docker image.
+A security gate stops the build before anything vulnerable is published to Nexus or deployed.
+It covers the card "Scanning images and dependencies in CI/CD".
+It builds on the `artifact-management` branch: the same pipeline (Nexus, rollback, retention), with four new stages.
 
 ```
-git push (branch artifact-management)
+git push (branch security-scanning)
    │  Jenkins checks the branch every 5 minutes (pollSCM)
    ▼
 Jenkins  (http://<Ubuntu IP>:8081)
-   1. Version            tag = short commit id, e.g. 3f2a9c1
-   2. Build and test     docker build: Maven compiles, runs unit tests, packs the WAR into the image
-   3. Publish to Nexus   WAR   → travelagency-maven   org.project:TravelAgency:1.0-3f2a9c1
-                         image → travelagency-docker  localhost:8092/travelagency:3f2a9c1
-   4. Pull from Nexus    docker pull of that image: the deploy uses the copy stored in Nexus
-   5. Terraform check    terraform fmt -check, init, validate
-   6. Deploy             terraform apply: MySQL, N Tomcats with the image from Nexus, Nginx
-   7. Smoke test         HTTP 200 through the load balancer
-   8. Nexus retention    keep the 5 newest versions in each repository
-   │
-   ▼
-Nexus Repository Community Edition  (container, http://<Ubuntu IP>:8091)
-   travelagency-maven    WARs, one release per commit, never overwritten
-   travelagency-docker   images, one tag per commit, never overwritten; registry on 127.0.0.1:8092
+    1. Version              tag = short commit id
+    2. Build and test       docker build: Maven, tests, WAR, image
+    3. Dependencies: Snyk   SCA: every library of pom.xml with its dependencies; snapshot to app.snyk.io
+    4. Image: Trivy         Ubuntu packages of the image, the jars in the WAR; SBOM of the image
+    5. Image: Grype         the same image against a second vulnerability database
+    6. Security gate        stop on a CRITICAL vulnerability that has a fix (accepted risks excepted)
+    7. Publish to Nexus     WAR + SBOM → travelagency-maven, image → travelagency-docker
+    8. Pull from Nexus
+    9. Terraform check
+   10. Deploy
+   11. Smoke test
+   12. Nexus retention
 ```
 
 | File | What it is |
 | --- | --- |
-| `nexus/docker-compose.yml` | Nexus 3.96.4: UI and REST API on port 8091, the Docker registry on `127.0.0.1:8092` |
-| `nexus/.env.example` | The admin password, the user Jenkins publishes with, accepting the EULA |
-| `nexus/setup.py` | Configures Nexus through its REST API: repositories, role, user, security. Safe to run again |
-| `ci/nexus.sh` | The Nexus steps of the pipeline: `publish`, `pull`, `retention` |
-| `Jenkinsfile` | 8 stages; new parameter `ROLLBACK_TO` |
-| `jenkins/casc.yaml` | New credential `nexus-ci` and the parameter `ROLLBACK_TO` |
-| `jenkins/Dockerfile` | Adds `jq` for reading the Nexus API answers |
+| `ci/scan.sh` | The scans and the gate: `snyk`, `trivy`, `grype`, `gate` |
+| `ci/accepted-risks.txt` | Vulnerabilities the gate lets pass, each with a reason and an end date |
+| `Jenkinsfile` | 12 stages; `SCAN_FAIL_ON = 'CRITICAL'`; reports on the build page |
+| `jenkins/Dockerfile` | Adds Trivy, Grype, Snyk CLI and Maven, each checked against a pinned checksum |
+| `jenkins/plugins.txt` | Adds Warnings (`warnings-ng`): the scanner results as pages of the build |
+| `jenkins/casc.yaml` | New credential `snyk-token` |
+| `ci/nexus.sh` | Uploads the SBOM next to the WAR |
 
-| Repository | Format | Stores | Version | Write policy |
-| --- | --- | --- | --- | --- |
-| `travelagency-maven` | Maven 2, hosted, release | WAR + generated POM + checksums | `1.0-<commit>` | Allow once: a version cannot be overwritten |
-| `travelagency-docker` | Docker, hosted | Application image | `<commit>` | Allow once: a tag always points to the same image |
+| Scanner | What it scans | Database |
+| --- | --- | --- |
+| Snyk Open Source | `pom.xml`: Snyk runs Maven and checks the whole dependency tree, direct and transitive | Snyk Vulnerability Database |
+| Trivy | The built image: Ubuntu packages, the JDK, the jars inside `ROOT.war` | Trivy DB (NVD, GitHub advisories, Ubuntu) + Trivy Java DB |
+| Grype | The same image | Anchore Grype DB |
+
+Two image scanners on purpose: their databases and matching differ, so each finds things the other misses.
 
 ## 1. Before You Start
 
-- Jenkins from the `jenkins` branch is running (`~/travel-jenkins`, README of that branch). Section 3 switches it to this branch.
-- **RAM: give the Ubuntu VM 8 GB.** Shut Ubuntu down, then in VMware: VM → Settings → Memory → 8192 MB, and start it again. Roughly: Nexus 1.5 GB, Jenkins 1 GB, three Tomcats 1.5 GB, MySQL 0.5 GB, Ubuntu itself 1 GB.
-- Disk: about 2 GB free for Nexus. A new version adds only the changed image layer with the WAR; the base layers are stored once.
-- Python 3 is already on Ubuntu (`python3 --version`); `setup.py` uses only its standard library.
+- The `artifact-management` branch works: Nexus is set up, Jenkins publishes and deploys (README of that branch).
+- **Snyk token.** Sign up at <https://app.snyk.io> (the free plan is enough; signing in with GitHub works). Then Account settings → General → Auth Token → click to show, and copy it.
+- Disk: about 2 GB more. The Jenkins image grows by about 300 MB (scanners, Maven), and the vulnerability databases are cached in `jenkins_home` (about 1 GB, downloaded by the first build).
 
-## 2. Start Nexus
+## 2. Switch Jenkins to This Branch
 
 ```bash
 cd ~/travel-jenkins
 git fetch origin
-git switch artifact-management
-cd nexus
-cp .env.example .env
-nano .env                       # NEXUS_ADMIN_PASSWORD, NEXUS_CI_PASSWORD, NEXUS_ACCEPT_EULA (see below)
-docker compose up -d
-docker compose ps               # wait for (healthy): 2–3 minutes the first time
-python3 setup.py
-```
-
-Nexus Community Edition is free, under the Sonatype End User License Agreement (<https://links.sonatype.com/products/nxrm/ce-eula>).
-Read it and write `NEXUS_ACCEPT_EULA=yes` into `.env` to accept it. Without that, `setup.py` sets the admin password and stops with the text of the agreement.
-
-What `setup.py` prints:
-
-```
-Waiting for Nexus at http://localhost:8091  up
-admin password: set from .env (Nexus deleted the generated one)
-EULA: accepted (NEXUS_ACCEPT_EULA=yes)
-realm Docker Bearer Token: enabled
-anonymous access: switched off
-repository travelagency-maven: created
-repository travelagency-docker: created
-role travelagency-ci: created
-user jenkins: created with the role travelagency-ci
-check: jenkins can read travelagency-maven and travelagency-docker
-check: Docker registry http://localhost:8092 accepts jenkins
-```
-
-Open `http://<Ubuntu IP>:8091/` on Windows and sign in as `admin` with `NEXUS_ADMIN_PASSWORD`.
-If Nexus shows its welcome wizard, click through it: `setup.py` has already done its steps.
-
-## 3. Switch Jenkins to This Branch
-
-```bash
-cd ~/travel-jenkins/jenkins
+git switch security-scanning
+cd jenkins
 nano .env
-#   REPO_BRANCH=artifact-management
-#   NEXUS_CI_USER=jenkins
-#   NEXUS_CI_PASSWORD=<the same as in nexus/.env>
-docker compose up -d --build    # the image gets jq; JCasC adds the credential nexus-ci and ROLLBACK_TO
+#   REPO_BRANCH=security-scanning
+#   SNYK_TOKEN=<the token from app.snyk.io>
+docker compose up -d --build    # 5–10 minutes: Maven, Trivy, Grype, Snyk CLI, the Warnings plugin
+docker compose exec jenkins sh -c 'mvn -v | head -1; trivy --version | head -1; grype version | head -2; snyk --version'
 ```
 
-The Terraform state stays in the `jenkins_home` volume, so Jenkins takes over the running stack and recreates nothing that has not changed.
+## 3. Run and Read the Results
 
-Installing Jenkins for the first time: follow sections 1–2 of the `jenkins` branch README with `git clone -b artifact-management …` and fill in the `NEXUS_CI_*` lines of `jenkins/.env` as well.
+**travelagency → Build with Parameters → Build.** The first build takes longer: Snyk lets Maven download the dependencies once, Trivy and Grype download their databases.
 
-## 4. First Build
+Where the results are:
+- **Console Output**, stage Security gate: the decision. Its form (the lines are an illustration):
+  ```
+  Security gate: no CRITICAL or higher vulnerability that already has a fix
+    snyk     0
+    trivy    1
+             CRITICAL CVE-2022-22965 org.springframework:spring-beans 5.3.9 -> 5.2.20.RELEASE, 5.3.18
+    grype    1
+             ...
+  ERROR: 2 findings above: upgrade the packages to the versions after '->' (pom.xml or the base image)
+  ```
+- **Build page → Snyk / Trivy / Grype** (left menu, Warnings plugin): every finding of every severity, with filters by severity and package, and the trend over builds.
+- **Build page → Build Artifacts → reports/**: `snyk.txt`, `trivy.txt`, `grype.txt` (tables of what was found), the full JSON reports, `snyk.sarif` and `sbom.cdx.json`.
+- **app.snyk.io → Projects → travelagency**: the dependency tree from the last build (`snyk monitor`); Snyk e-mails when a new vulnerability appears in it.
 
-**travelagency → Build with Parameters → Build.** In the log:
+The gate counts only vulnerabilities of `SCAN_FAIL_ON` (CRITICAL) or higher that already have a fixed version: those can be fixed now, so they block. Everything else is in the reports.
+
+## 4. When the Gate Stops the Build
+
+The gate prints each blocking finding as `severity id package installed-version -> fixed-version`. Fix it, commit, push; the next build checks again.
+
+| Where the package is | How to fix |
+| --- | --- |
+| A library in `pom.xml` (Snyk; Trivy and Grype show the jar in `ROOT.war`) | Raise its version to the one after `->`. For a transitive library, raise the library that brings it (Snyk shows the path), or pin it in `<dependencyManagement>` |
+| An Ubuntu package or the JDK of the base image (Trivy, Grype) | Get the newest base image: `docker pull tomcat:9.0-jdk17-temurin-noble` on Ubuntu, then build again |
+| No fixed version you can use | Add it to `ci/accepted-risks.txt` with the reason and an end date (section 5) |
+
+The original libraries of the project have known critical vulnerabilities, for example Spring Framework 5.3.9 (CVE-2022-22965, "Spring4Shell", remote code execution in exactly this setup: Spring MVC as a WAR on Tomcat with JDK 9+) and Spring Security 5.6.0 (CVE-2022-22978, authorization bypass). So the first commit of this branch, which adds only the scans, stops at the gate.
+
+## 5. Accepted Risks
+
+`ci/accepted-risks.txt`, one vulnerability per line:
 
 ```
-WAR uploaded: http://host.docker.internal:8091/repository/travelagency-maven/org/project/TravelAgency/1.0-3f2a9c1/TravelAgency-1.0-3f2a9c1.war
-Image pushed: localhost:8092/travelagency:3f2a9c1
-...
-Deploying the image from Nexus: localhost:8092/travelagency@sha256:…
-...
-travelagency-maven: kept the 5 newest versions of TravelAgency and the deployed one
-travelagency-docker: kept the 5 newest versions of travelagency and the deployed one
+<ID> <until YYYY-MM-DD> <why it is accepted and what will remove it>
 ```
 
-In Nexus, **Browse**:
-- `travelagency-maven` → `org/project/TravelAgency/1.0-3f2a9c1/`: the `.war`, the `.pom`, and their `.md5`, `.sha1`, `.sha256`, `.sha512`;
-- `travelagency-docker` → `travelagency` → `3f2a9c1`.
+- The ID can be a CVE, a GitHub advisory (GHSA) or a Snyk id; the gate matches it against all ids each scanner gives, so one line covers all three scanners.
+- The scanners still report it; only the gate lets it pass, and prints `(accepted: ci/accepted-risks.txt)` next to it.
+- After the date the gate blocks it again, so an accepted risk is looked at again instead of being forgotten.
+- Every line is a decision in Git: who accepted what, when and why.
 
-Run the build once more without a new commit: the log says `… is already in travelagency-maven: a release is never overwritten`, and the same for the image. One commit gives exactly one WAR and one image.
+## 6. How It Is Built
 
-## 5. Rollback from Nexus
+- **Scan before publish.** The scans run after the build and before Publish to Nexus. A build that fails the gate leaves nothing in Nexus and changes nothing on the servers.
+- **Scans collect, the gate decides.** The three scan stages only write reports, so a build always shows all three results; the stage Security gate then decides once, with one rule for all scanners.
+- **Fail closed.** If a scanner cannot run (no network, bad token), its stage fails and so does the build: a scan that did not happen never counts as clean.
+- **Tools as code.** Trivy, Grype, Snyk CLI and Maven are installed in the Jenkins image at fixed versions and checked against pinned SHA-256/SHA-512 sums. Their databases are cached in `jenkins_home` and refreshed by the scanners themselves.
+- **Secrets.** The Snyk token is the Jenkins credential `snyk-token`, from `jenkins/.env` through JCasC; Jenkins masks it in the log.
+- **SBOM.** Trivy writes a CycloneDX list of every package in the image (`reports/sbom.cdx.json`). It is archived with the build and uploaded to Nexus next to the WAR as `TravelAgency-<version>-cyclonedx.json`, so for any stored version it is known what is inside.
+- **Old reports never count.** The stage Version deletes `reports/` first, so the gate reads only the reports of this build.
+- **Rollback** (`ROLLBACK_TO`) skips the scans: the version in Nexus passed the gate when it was built.
 
-1. Find an older version: Nexus → Browse → `travelagency-docker` → `travelagency`, or the build descriptions in Jenkins (`3f2a9c1, round_robin, 3 servers`).
-2. **Build with Parameters**, `ROLLBACK_TO` = that 7-character commit id → **Build**.
-3. Build and test, Publish and Retention are skipped (grey). Pull from Nexus downloads that image, Terraform puts it on the application servers, the smoke test checks the site. The build description starts with `rollback to`.
-
-Back to the newest version: **Build with Parameters** with an empty `ROLLBACK_TO`, or push a commit.
-A rollback changes only the application image; the infrastructure comes from the Terraform code of the current commit.
-
-## 6. Artifacts Outside Jenkins
-
-Download a WAR on Ubuntu (curl asks for the password of `jenkins`):
-
-```bash
-curl -u jenkins -fO http://localhost:8091/repository/travelagency-maven/org/project/TravelAgency/1.0-3f2a9c1/TravelAgency-1.0-3f2a9c1.war
-```
-
-Pull an image on Ubuntu:
-
-```bash
-docker login localhost:8092 -u jenkins
-docker pull localhost:8092/travelagency:3f2a9c1
-docker logout localhost:8092
-```
-
-The registry listens only on `127.0.0.1` of Ubuntu, because it speaks plain HTTP. The web UI and the Maven repository are on port 8091 for the whole network.
-
-## 7. How It Is Built
-
-- **Nexus as code.** `setup.py` configures Nexus through the REST API from `nexus/.env`; nothing is set up by hand. Each step reads the current state first, so a second run only reports `already set` / `checked`.
-- **Write once.** Both repositories use the write policy "Allow once": a version, once stored, never changes. `ci/nexus.sh publish` checks first and skips what is already there. The Maven repository has the release policy, so it does not accept `-SNAPSHOT` versions.
-- **Version = commit.** The WAR is `1.0-<commit>` (the release part of the version in `pom.xml` plus the commit id), the image tag is `<commit>`. The same id is in the build description and in `terraform output app_image`, so the running version leads straight to its commit.
-- **One build, two artifacts.** The WAR uploaded to Nexus is copied out of the built image (`docker create` + `docker cp`), so it is the same file Tomcat runs.
-- **Deploy from the repository.** The stage Pull from Nexus pulls `localhost:8092/travelagency:<commit>`, and Terraform runs that image. A version missing from Nexus cannot be deployed.
-- **Least privilege.** Jenkins signs in as `jenkins` with the role `travelagency-ci`: the two TravelAgency repositories and the upload API, nothing else. The admin password is only in `nexus/.env`. Anonymous access is off, and the registry asks for a login on every pull and push.
-- **Secrets.** The Jenkins credential `nexus-ci` comes from `jenkins/.env` through JCasC. `ci/nexus.sh` gives the password to curl in a temporary file and to `docker login` on stdin, with a temporary `DOCKER_CONFIG` deleted after the step: the password is not in the process list, not in the log (Jenkins masks it) and not left in `~/.docker` of Jenkins.
-- **Registry without TLS on localhost.** Docker trusts a registry on `localhost` over plain HTTP without any `insecure-registries` setting, so the registry is published only on `127.0.0.1`.
-- **Retention.** After a successful smoke test, `ci/nexus.sh retention` keeps the `NEXUS_KEEP` (5) newest versions in each repository and always the deployed one. If it fails, the stage turns yellow (UNSTABLE) and the build stays green. Deleted components free disk space after two Nexus tasks run: gear icon (administration) → System → Tasks → Create task → "Docker - Delete unused manifests and images", then "Admin - Compact blob store" (for example, weekly).
-- **Memory.** The Nexus JVM is limited to 1 GB of heap (`INSTALL4J_ADD_VM_PARAMS`); by default it would take a quarter of the VM memory.
-- **Community Edition.** Free to use; Sonatype sets usage limits for it (number of components, requests per day) far above what this project needs.
-
-## 8. Check
+## 7. Check
 
 | What | How | Expected |
 | --- | --- | --- |
-| Nexus is up | `docker compose ps` in `nexus/` | `(healthy)` |
-| Configuration is code | `python3 setup.py` again | only `already set` / `checked`, nothing created |
-| No anonymous access | `curl -s -o /dev/null -w '%{http_code}\n' "http://localhost:8091/service/rest/v1/components?repository=travelagency-maven"` | `401` or `403`, not `200` |
-| The registry needs a login | `curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8092/v2/` | `401` |
-| A build publishes | Console Output of a build after a new commit | `WAR uploaded`, `Image pushed` |
-| Write once | Build again without a new commit | `already in …: … never overwritten` |
-| Deploy from Nexus | Stage Pull from Nexus | `Deploying the image from Nexus: localhost:8092/travelagency@sha256:…` |
-| Rollback | `ROLLBACK_TO` = an older commit | the site works; `app_image = "localhost:8092/travelagency:<older commit>"` in the Terraform output |
-| Retention | 6 or more builds of new commits | 5 versions in each repository (plus the deployed one, if it is older) |
+| Scanners in Jenkins | the `docker compose exec` line of section 2 | Maven 3.9.16, Trivy 0.75.0, Grype 0.120.1, Snyk 1.1307.4 |
+| The gate stops a vulnerable build | the build of the first commit of this branch (old libraries) | red at Security gate; Publish, Deploy not run; Nexus unchanged |
+| The gate passes | a build after the upgrade | green; `Passed` in the Security gate log |
+| Reports | build page | Snyk, Trivy, Grype pages; `reports/` in Build Artifacts |
+| SBOM in Nexus | Browse → `travelagency-maven` → `…/1.0-<commit>/` | `TravelAgency-1.0-<commit>-cyclonedx.json` |
+| Snyk project | app.snyk.io → Projects | `travelagency`, tested at the time of the build |
 
-## 9. If Something Goes Wrong
+## 8. If Something Goes Wrong
 
 | Problem | What to do |
 | --- | --- |
-| `setup.py`: `Nexus did not start in 10 minutes` | `docker compose logs nexus` in `nexus/`; often not enough memory: `free -h`, see section 1 |
-| `setup.py` stops with the EULA text | Read it, write `NEXUS_ACCEPT_EULA=yes` into `nexus/.env`, run `setup.py` again |
-| `setup.py`: `the generated password … is gone` | The admin password was changed in the UI: write the current one into `NEXUS_ADMIN_PASSWORD` |
-| Publish: `Nexus refused jenkins (HTTP 401)` | `NEXUS_CI_PASSWORD` differs between `jenkins/.env` and `nexus/.env`: make them equal, run `python3 setup.py` and `docker compose up -d` in `jenkins/` |
-| Publish: `Nexus answered HTTP 000` | Nexus is down or unreachable from Jenkins: `docker compose ps` in `nexus/`, `curl -I http://localhost:8091/` on Ubuntu |
-| `docker push`: `server gave HTTP response to HTTPS client` | The registry name must be `localhost:8092` (`REGISTRY` in the Jenkinsfile): Docker allows plain HTTP only for localhost |
-| `docker push`: `denied` or `unauthorized` | The role of `jenkins` is wrong: `python3 setup.py` puts it back |
-| Rollback: `manifest unknown` | That version is not in Nexus (deleted by retention or never built): Browse → `travelagency-docker` |
-| The disk fills up | Create the two cleanup tasks from section 7 and run them |
+| `SNYK_TOKEN is not set` / `Authentication error` | Put the token into `jenkins/.env` (`SNYK_TOKEN=`), `docker compose up -d` in `jenkins/` |
+| `snyk test could not run (exit code 2)` | Look above it in the log: usually Maven could not resolve `pom.xml` or Snyk is unreachable |
+| Trivy or Grype: database download fails | Network or rate limit: build again later; the databases are cached after the first success |
+| `reports/… is missing: the … scan did not run` | A scan stage failed or was skipped; the gate never passes without all three reports |
+| The gate blocks a package with no fixed version you can use | Section 5: accept it with a reason and an end date |
+| `ci/accepted-risks.txt: '…' must be: <ID> <YYYY-MM-DD> <reason>` | Fix that line: three fields, a date like `2027-04-30` |
+| Build timeout on the first run | The databases are large; build again: they are already partly cached |

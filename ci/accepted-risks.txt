@@ -1,0 +1,3 @@
+# Vulnerabilities the security gate (ci/scan.sh gate) lets pass for now, one per line:
+#   <ID> <until YYYY-MM-DD> <why it is accepted and what will remove it>
+# ID is a CVE, GHSA or Snyk id. The scanners still show it in their reports; after the date the gate blocks it again.

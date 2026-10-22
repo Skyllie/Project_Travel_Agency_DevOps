@@ -35,6 +35,11 @@ credentials:
               username: "${NEXUS_CI_USER}"
               password: "${NEXUS_CI_PASSWORD}"
               description: "Nexus: the user that publishes and pulls the WAR and the image"
+          - string:
+              scope: GLOBAL
+              id: "snyk-token"
+              secret: "${SNYK_TOKEN}"
+              description: "Snyk: API token for snyk test / snyk monitor"
 
 unclassified:
   location:
@@ -46,7 +51,7 @@ unclassified:
 jobs:
   - script: |
       pipelineJob('travelagency') {
-        description('Build the image, publish the WAR and the image to Nexus, deploy the image from Nexus with Terraform, smoke-test the load balancer. Jenkinsfile: branch ${REPO_BRANCH}')
+        description('Build the image, scan it and its dependencies (Snyk, Trivy, Grype), publish the WAR and the image to Nexus, deploy the image from Nexus with Terraform, smoke-test the load balancer. Jenkinsfile: branch ${REPO_BRANCH}')
         parameters {
           choiceParam('LB_ALGORITHM', ['round_robin', 'weighted', 'least_conn', 'ip_hash', 'hash', 'random', 'backup'], 'Nginx load-balancing algorithm')
           choiceParam('APP_REPLICAS', ['3', '2', '1', '4', '5'], 'Number of application servers')

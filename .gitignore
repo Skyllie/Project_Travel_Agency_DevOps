@@ -76,3 +76,6 @@ HELP.md
 
 # Python
 __pycache__/
+
+# Scanner reports of the pipeline
+reports/

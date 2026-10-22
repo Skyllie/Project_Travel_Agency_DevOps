@@ -27,6 +27,33 @@ RUN arch="$(dpkg --print-architecture)" \
  && rm -f terraform_* \
  && terraform -version
 
+# Security scanners and Maven, each checked against a pinned checksum (amd64, like the Ubuntu VM):
+#   Trivy and Grype scan the built image, Snyk scans the Maven dependencies (it runs Maven to read them)
+ARG MAVEN_VERSION=3.9.16
+ARG MAVEN_SHA512=831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6
+ARG TRIVY_VERSION=0.75.0
+ARG TRIVY_SHA256=c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
+ARG GRYPE_VERSION=0.120.1
+ARG GRYPE_SHA256=0a9ee97ef5ae2ee953b0a80098105052e846cdbe319a57d808b519c33cd1343d
+ARG SNYK_VERSION=1.1307.4
+ARG SNYK_SHA256=b0baee4fa4d7d11b7df927a1046cf8137a8a89fafac8101a45c3c0e0777ddc35
+RUN cd /tmp \
+ && curl -fsSLo maven.tar.gz "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" \
+ && echo "${MAVEN_SHA512}  maven.tar.gz" | sha512sum -c - \
+ && tar -xzf maven.tar.gz -C /opt \
+ && ln -s "/opt/apache-maven-${MAVEN_VERSION}/bin/mvn" /usr/local/bin/mvn \
+ && curl -fsSLo trivy.tar.gz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+ && echo "${TRIVY_SHA256}  trivy.tar.gz" | sha256sum -c - \
+ && tar -xzf trivy.tar.gz -C /usr/local/bin trivy \
+ && curl -fsSLo grype.tar.gz "https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_amd64.tar.gz" \
+ && echo "${GRYPE_SHA256}  grype.tar.gz" | sha256sum -c - \
+ && tar -xzf grype.tar.gz -C /usr/local/bin grype \
+ && curl -fsSLo /usr/local/bin/snyk "https://github.com/snyk/cli/releases/download/v${SNYK_VERSION}/snyk-linux" \
+ && echo "${SNYK_SHA256}  /usr/local/bin/snyk" | sha256sum -c - \
+ && chmod 0755 /usr/local/bin/snyk \
+ && rm -f /tmp/*.tar.gz \
+ && mvn -v && trivy --version && grype version && snyk --version
+
 USER jenkins
 
 # Plugins are installed at build time, so Jenkins starts ready to use

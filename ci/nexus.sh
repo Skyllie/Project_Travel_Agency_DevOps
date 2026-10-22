@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Nexus steps of the Jenkins pipeline (Jenkinsfile):
-#   bash ci/nexus.sh publish     the WAR -> Maven repository, the image -> Docker registry; skips what is already there
+#   bash ci/nexus.sh publish     the WAR (+ SBOM) -> Maven repository, the image -> Docker registry; skips what is there
 #   bash ci/nexus.sh pull        pull the image from the Nexus registry: the deploy always uses that copy
 #   bash ci/nexus.sh retention   keep the NEXUS_KEEP newest versions in both repositories, delete older ones
 #
@@ -15,6 +15,8 @@ umask 077
 
 # Where the Dockerfile puts the WAR inside the image
 readonly WAR_IN_IMAGE=/usr/local/tomcat/webapps/ROOT.war
+# Written by ci/scan.sh trivy; stored next to the WAR as TravelAgency-<version>-cyclonedx.json
+readonly SBOM=reports/sbom.cdx.json
 
 work=$(mktemp -d)
 container=
@@ -121,15 +123,24 @@ publish() {
             docker cp "$container:$WAR_IN_IMAGE" "$work/$artifact.war"
             docker rm "$container" >/dev/null
             container=
-            nexus -X POST "$NEXUS_URL/service/rest/v1/components?repository=$NEXUS_MAVEN_REPO" \
-                -F "maven2.groupId=$group" \
-                -F "maven2.artifactId=$artifact" \
-                -F "maven2.version=$version" \
-                -F "maven2.packaging=war" \
-                -F "maven2.generate-pom=true" \
-                -F "maven2.asset1=@$work/$artifact.war" \
+            local form=(
+                -F "maven2.groupId=$group"
+                -F "maven2.artifactId=$artifact"
+                -F "maven2.version=$version"
+                -F "maven2.packaging=war"
+                -F "maven2.generate-pom=true"
+                -F "maven2.asset1=@$work/$artifact.war"
                 -F "maven2.asset1.extension=war"
-            echo "WAR uploaded: $url"
+            )
+            local upload="$NEXUS_URL/service/rest/v1/components?repository=$NEXUS_MAVEN_REPO"
+            if [ -f "$SBOM" ] && nexus -X POST "$upload" "${form[@]}" \
+                    -F "maven2.asset2=@$SBOM" -F "maven2.asset2.extension=json" -F "maven2.asset2.classifier=cyclonedx"; then
+                echo "WAR and SBOM uploaded: $url"
+            else
+                [ ! -f "$SBOM" ] || echo "WARNING: Nexus did not take the WAR with the SBOM (see above), uploading the WAR alone"
+                nexus -X POST "$upload" "${form[@]}"
+                echo "WAR uploaded: $url"
+            fi
             ;;
         401 | 403)
             fail "Nexus refused $NEXUS_USER (HTTP $code): check NEXUS_CI_USER / NEXUS_CI_PASSWORD in jenkins/.env and nexus/.env"

@@ -1,5 +1,6 @@
-// CI/CD for TravelAgency with artifact management in Nexus:
-//   build the image (Maven + tests inside the Docker build) -> publish the WAR and the image to Nexus ->
+// CI/CD for TravelAgency with security scans and artifact management in Nexus:
+//   build the image (Maven + tests inside the Docker build) -> scan the dependencies (Snyk) and the image
+//   (Trivy, Grype) -> security gate -> publish the WAR, its SBOM and the image to Nexus ->
 //   pull the image back from Nexus -> check the Terraform code -> deploy with Terraform (MySQL, N Tomcats,
 //   Nginx) -> smoke-test through the load balancer -> keep the newest versions in Nexus.
 // ROLLBACK_TO=<commit id> skips the build and deploys a version that is already in Nexus.
@@ -12,7 +13,8 @@ pipeline {
         timestamps()
         disableConcurrentBuilds()
         buildDiscarder(logRotator(numToKeepStr: '15'))
-        timeout(time: 30, unit: 'MINUTES')
+        // The first build with scans downloads the vulnerability databases (about 1 GB)
+        timeout(time: 45, unit: 'MINUTES')
     }
 
     triggers {
@@ -48,11 +50,15 @@ pipeline {
         REGISTRY            = 'localhost:8092'
         // How many versions stay in each Nexus repository
         NEXUS_KEEP          = '5'
+        // The security gate stops the build on a vulnerability of this severity or higher that has a fix
+        SCAN_FAIL_ON        = 'CRITICAL'
     }
 
     stages {
         stage('Version') {
             steps {
+                // Reports of the previous build must not reach the security gate
+                sh 'rm -rf reports'
                 script {
                     def rollback = (params.ROLLBACK_TO ?: '').trim()
                     env.ROLLBACK = rollback ? 'true' : 'false'
@@ -84,10 +90,45 @@ pipeline {
             }
         }
 
+        // The three scans only collect reports; the security gate decides
+        stage('Dependencies: Snyk') {
+            when { environment name: 'ROLLBACK', value: 'false' }
+            steps {
+                // SCA: the libraries of pom.xml and their dependencies against the Snyk database
+                withCredentials([string(credentialsId: 'snyk-token', variable: 'SNYK_TOKEN')]) {
+                    sh 'bash ci/scan.sh snyk'
+                }
+            }
+        }
+
+        stage('Image: Trivy') {
+            when { environment name: 'ROLLBACK', value: 'false' }
+            steps {
+                // OS packages of the base image and the jars in the WAR; also writes the SBOM
+                sh 'bash ci/scan.sh trivy'
+            }
+        }
+
+        stage('Image: Grype') {
+            when { environment name: 'ROLLBACK', value: 'false' }
+            steps {
+                // The same image against a second vulnerability database
+                sh 'bash ci/scan.sh grype'
+            }
+        }
+
+        stage('Security gate') {
+            when { environment name: 'ROLLBACK', value: 'false' }
+            steps {
+                // Nothing is published or deployed if a scanner found a SCAN_FAIL_ON vulnerability with a fix
+                sh 'bash ci/scan.sh gate'
+            }
+        }
+
         stage('Publish to Nexus') {
             when { environment name: 'ROLLBACK', value: 'false' }
             steps {
-                // WAR -> travelagency-maven as org.project:TravelAgency:1.0-<commit>,
+                // WAR and SBOM -> travelagency-maven as org.project:TravelAgency:1.0-<commit>,
                 // image -> travelagency-docker as travelagency:<commit>. Both are write-once
                 withCredentials([usernamePassword(credentialsId: 'nexus-ci',
                                                   usernameVariable: 'NEXUS_USER', passwordVariable: 'NEXUS_PASSWORD')]) {
@@ -196,6 +237,12 @@ pipeline {
             echo "Deployed ${env.REGISTRY_IMAGE}: http://<Ubuntu IP>:${env.LB_PORT}/"
         }
         always {
+            // Scanner reports: files of the build, and the pages Trivy, Grype and Snyk on the build page
+            archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
+            recordIssues(enabledForFailure: true, skipBlames: true, skipPublishingChecks: true,
+                         tools: [sarif(id: 'snyk', name: 'Snyk', pattern: 'reports/snyk.sarif'),
+                                 trivy(pattern: 'reports/trivy.json'),
+                                 grype(pattern: 'reports/grype.json')])
             // Keep the three newest local tags of both names, and the current one. Nexus keeps the history
             sh '''
                 for repo in travelagency "$REGISTRY/travelagency"; do

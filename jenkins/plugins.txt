@@ -5,3 +5,4 @@ git
 credentials-binding
 timestamper
 pipeline-graph-view
+warnings-ng
