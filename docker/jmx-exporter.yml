@@ -1,0 +1,41 @@
+# Prometheus JMX exporter (Java agent in Tomcat, Dockerfile): http://<app server>:9404/metrics
+# JVM metrics (heap, GC, threads, CPU) are exported by the agent itself; these rules add Tomcat.
+# Based on examples/tomcat.yml of prometheus/jmx_exporter.
+lowercaseOutputName: true
+lowercaseOutputLabelNames: true
+includeObjectNames:
+  - "Catalina:type=GlobalRequestProcessor,*"
+  - "Catalina:type=ThreadPool,*"
+  - "Catalina:type=Manager,*"
+rules:
+  # Requests, errors, processing time (ms), bytes of the HTTP connector
+  - pattern: 'Catalina<type=GlobalRequestProcessor, name=\"(\w+-\w+)-(\d+)\"><>(requestCount|errorCount|processingTime|bytesSent|bytesReceived):'
+    name: tomcat_$3_total
+    labels:
+      port: "$2"
+      protocol: "$1"
+    help: Tomcat global $3
+    type: COUNTER
+  # Request threads: busy, current, maximum
+  - pattern: 'Catalina<type=ThreadPool, name="(\w+-\w+)-(\d+)"><>(currentThreadCount|currentThreadsBusy|maxThreads|connectionCount):'
+    name: tomcat_threadpool_$3
+    labels:
+      port: "$2"
+      protocol: "$1"
+    help: Tomcat threadpool $3
+    type: GAUGE
+  # HTTP sessions of the application
+  - pattern: 'Catalina<type=Manager, host=([-a-zA-Z0-9+&@#/%?=~_|!:.,;]*[-a-zA-Z0-9+&@#/%=~_|]), context=([-a-zA-Z0-9+/$%~_-|!.]*)><>(activeSessions):'
+    name: tomcat_session_$3
+    labels:
+      context: "$2"
+      host: "$1"
+    help: Tomcat sessions $3
+    type: GAUGE
+  - pattern: 'Catalina<type=Manager, host=([-a-zA-Z0-9+&@#/%?=~_|!:.,;]*[-a-zA-Z0-9+&@#/%=~_|]), context=([-a-zA-Z0-9+/$%~_-|!.]*)><>(sessionCounter|rejectedSessions|expiredSessions):'
+    name: tomcat_session_$3_total
+    labels:
+      context: "$2"
+      host: "$1"
+    help: Tomcat sessions $3 total
+    type: COUNTER

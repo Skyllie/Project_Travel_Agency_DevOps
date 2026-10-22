@@ -38,6 +38,7 @@ locals {
     sticky    = var.lb_sticky
     nodes     = local.nodes
     pool      = local.pool
+    subnet    = var.subnet
   })
 
   # Environment shared by all application servers; the database is found by its container name
@@ -141,9 +142,11 @@ resource "docker_container" "app_first" {
     "JAVA_OPTS=${var.java_opts} -DjvmRoute=${local.nodes[0].name}",
   ])
 
+  # The alias "app" is shared by all application servers: Prometheus finds them by it (monitoring/)
   networks_advanced {
     name         = docker_network.lb_net.name
     ipv4_address = local.nodes[0].ip
+    aliases      = ["app"]
   }
 
   healthcheck {
@@ -176,6 +179,7 @@ resource "docker_container" "app_more" {
   networks_advanced {
     name         = docker_network.lb_net.name
     ipv4_address = local.nodes[count.index + 1].ip
+    aliases      = ["app"]
   }
 
   healthcheck {

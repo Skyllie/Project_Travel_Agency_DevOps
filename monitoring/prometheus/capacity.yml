@@ -1,0 +1,39 @@
+# Recording rules: numbers the dashboards, the alerts and the capacity plan use.
+# Computed every 15 s and stored as their own series, so long ranges stay fast.
+
+groups:
+  - name: capacity
+    rules:
+      # ---- Host
+      - record: travelagency:host_cpu_used:ratio5m
+        expr: 1 - avg(rate(node_cpu_seconds_total{job="node", mode="idle"}[5m]))
+      - record: travelagency:host_memory_used:ratio
+        expr: 1 - node_memory_MemAvailable_bytes{job="node"} / node_memory_MemTotal_bytes{job="node"}
+      - record: travelagency:host_disk_used:ratio
+        expr: |
+          1 - node_filesystem_avail_bytes{job="node", mountpoint="/"}
+            / node_filesystem_size_bytes{job="node", mountpoint="/"}
+
+      # ---- Application load
+      # Requests per second, all servers together and per server
+      - record: travelagency:requests:rate1m
+        expr: sum(rate(tomcat_requestcount_total{job="tomcat"}[1m]))
+      - record: instance:requests:rate1m
+        expr: sum by (instance) (rate(tomcat_requestcount_total{job="tomcat"}[1m]))
+      # Average time Tomcat spends on a request (processingtime is in milliseconds)
+      - record: travelagency:response_time_seconds:avg5m
+        expr: |
+          sum(rate(tomcat_processingtime_total{job="tomcat"}[5m])) / 1000
+            / sum(rate(tomcat_requestcount_total{job="tomcat"}[5m]))
+      # CPU and memory of one application server
+      - record: instance:cpu_cores:rate5m
+        expr: sum by (instance) (rate(process_cpu_seconds_total{job="tomcat"}[5m]))
+      - record: instance:heap_used_bytes
+        expr: sum by (instance) (jvm_memory_used_bytes{job="tomcat", area="heap"})
+      # Cost of one request: CPU seconds per request, the base of the capacity plan
+      - record: travelagency:cpu_seconds_per_request:rate5m
+        expr: |
+          sum(rate(process_cpu_seconds_total{job="tomcat"}[5m]))
+            / sum(rate(tomcat_requestcount_total{job="tomcat"}[5m]))
+      - record: travelagency:app_servers:count
+        expr: count(up{job="tomcat"} == 1)

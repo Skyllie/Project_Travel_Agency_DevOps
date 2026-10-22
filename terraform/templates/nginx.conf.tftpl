@@ -47,6 +47,7 @@ log_format balancer '$remote_addr "$request" $status -> $served_by '
 server {
     listen 80;
     server_name _;
+    server_tokens off;
     access_log /var/log/nginx/access.log balancer;
 
     location / {
@@ -66,8 +67,12 @@ server {
         add_header X-Served-By $served_by always;
     }
 
+    # Counters for the monitoring (nginx-prometheus-exporter): only Nginx itself and the Docker network
     location = /nginx-status {
         stub_status;
         access_log off;
+        allow 127.0.0.1;
+        allow ${subnet};
+        deny all;
     }
 }

@@ -1,0 +1,9 @@
+# Blackbox exporter: how the HTTP checks are made (prometheus.yml says what is checked)
+modules:
+  http_2xx:
+    prober: http
+    timeout: 5s
+    http:
+      preferred_ip_protocol: ip4
+      valid_status_codes: []        # any 2xx
+      follow_redirects: true

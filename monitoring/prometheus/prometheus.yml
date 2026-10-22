@@ -1,0 +1,117 @@
+# Prometheus: what is scraped, how often, and the alert rules.
+# Names like travelagency-tf-lb are containers of the stack Jenkins deploys with Terraform;
+# Prometheus reaches them on their network travelagency-tf-net (monitoring/docker-compose.yml).
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+  - /etc/prometheus/capacity.yml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # ---- Infrastructure: the Ubuntu host and its containers
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
+        labels:
+          instance: ubuntu
+
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["cadvisor:8080"]
+    metric_relabel_configs:
+      # Only the containers themselves, not every cgroup of the host
+      - source_labels: [name]
+        regex: ""
+        action: drop
+
+  # ---- Application: JVM and Tomcat metrics of every application server (JMX exporter, port 9404).
+  # The servers are found through DNS: Terraform gives all of them the network alias "app",
+  # so a server added by scaling (APP_REPLICAS) is scraped without a change here.
+  - job_name: tomcat
+    dns_sd_configs:
+      - names: ["app"]
+        type: A
+        port: 9404
+        refresh_interval: 15s
+    relabel_configs:
+      # appN has the address .1N in the subnet (terraform/main.tf): 172.31.0.12 -> app2
+      - source_labels: [__address__]
+        regex: '.*\.1(\d):9404'
+        target_label: instance
+        replacement: "app$1"
+
+  # ---- Load balancer: Nginx stub_status through the exporter
+  - job_name: nginx
+    static_configs:
+      - targets: ["nginx-exporter:9113"]
+        labels:
+          instance: travelagency-tf-lb
+
+  # ---- Database
+  - job_name: mysql
+    static_configs:
+      - targets: ["mysqld-exporter:9104"]
+        labels:
+          instance: travelagency-tf-db
+
+  # ---- Black-box checks: what a user sees
+  # The site through the load balancer
+  - job_name: blackbox-site
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets: ["http://travelagency-tf-lb/form-login"]
+    relabel_configs: &probe
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  # Every application server directly, past the load balancer
+  - job_name: blackbox-app
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    dns_sd_configs:
+      - names: ["app"]
+        type: A
+        port: 8080
+        refresh_interval: 15s
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: "(.*)"
+        target_label: __param_target
+        replacement: "http://$1/form-login"
+      - source_labels: [__address__]
+        regex: '.*\.1(\d):8080'
+        target_label: instance
+        replacement: "app$1"
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  # The CI/CD tools on the host
+  - job_name: blackbox-tools
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets: ["http://host.docker.internal:8081/login"]
+        labels:
+          tool: jenkins
+      - targets: ["http://host.docker.internal:8091/service/rest/v1/status"]
+        labels:
+          tool: nexus
+      - targets: ["http://host.docker.internal:9000/api/system/status"]
+        labels:
+          tool: sonarqube
+    relabel_configs: *probe

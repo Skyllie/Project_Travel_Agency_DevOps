@@ -79,3 +79,6 @@ __pycache__/
 
 # Scanner reports of the pipeline
 reports/
+
+# Load test results (monitoring/loadtest.py)
+monitoring/results/

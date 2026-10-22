@@ -14,3 +14,4 @@ sonarqube
 *.md
 LICENSE
 docker-compose.yml
+monitoring

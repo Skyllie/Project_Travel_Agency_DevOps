@@ -1,0 +1,153 @@
+# Alert rules. Firing alerts are in the table "Firing alerts" of both Grafana dashboards and in Prometheus → Alerts.
+# severity: critical = users are affected now; warning = it will become a problem.
+
+groups:
+  - name: availability
+    rules:
+      - alert: SiteDown
+        expr: probe_success{job="blackbox-site"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The site does not answer through the load balancer"
+          description: "{{ $labels.instance }} has failed every check for 1 minute."
+
+      - alert: AppServerDown
+        expr: probe_success{job="blackbox-app"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Application server {{ $labels.instance }} does not answer"
+          description: "The load balancer sends its users to the other servers; capacity is lower."
+
+      # A stopped or deleted server leaves the DNS name "app", so its own checks disappear instead of
+      # failing: this rule remembers the servers of the last 30 minutes. It also fires for 30 minutes
+      # after a planned scale-down (APP_REPLICAS)
+      - alert: AppServerGone
+        expr: max_over_time(up{job="tomcat"}[30m]) unless on (instance) up{job="tomcat"}
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Application server {{ $labels.instance }} is gone"
+          description: "It was there in the last 30 minutes and is not found now (stopped, deleted or scaled down)."
+
+      - alert: CiToolDown
+        expr: probe_success{job="blackbox-tools"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.tool }} does not answer"
+          description: "{{ $labels.instance }} has failed for 5 minutes; the pipeline cannot run."
+
+      - alert: MySQLDown
+        expr: mysql_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MySQL does not answer"
+          description: "The exporter cannot connect to {{ $labels.instance }}."
+
+      - alert: ScrapeTargetDown
+        expr: up == 0
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prometheus cannot read {{ $labels.job }} / {{ $labels.instance }}"
+          description: "No metrics from this target for 3 minutes."
+
+  - name: application
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(tomcat_errorcount_total[5m])) / sum(rate(tomcat_requestcount_total[5m])) > 0.05
+          and sum(rate(tomcat_requestcount_total[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 5 % of the requests end with an error"
+          description: "{{ $value | humanizePercentage }} of the requests of the last 5 minutes failed."
+
+      - alert: SlowResponses
+        expr: travelagency:response_time_seconds:avg5m > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Requests take more than 1 s on average"
+          description: "Average processing time in Tomcat: {{ $value | humanizeDuration }}."
+
+      - alert: JvmHeapAlmostFull
+        expr: |
+          sum by (instance) (jvm_memory_used_bytes{job="tomcat", area="heap"})
+            / sum by (instance) (jvm_memory_max_bytes{job="tomcat", area="heap"}) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }}: heap more than 90 % full"
+          description: "The JVM spends more and more time in garbage collection; raise -Xmx or add a server."
+
+      - alert: TomcatThreadsBusy
+        expr: |
+          max by (instance) (tomcat_threadpool_currentthreadsbusy{job="tomcat"}
+            / tomcat_threadpool_maxthreads{job="tomcat"}) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }}: more than 80 % of the request threads are busy"
+          description: "New requests will wait; add an application server (APP_REPLICAS)."
+
+      - alert: MySQLTooManyConnections
+        expr: mysql_global_status_threads_connected / mysql_global_variables_max_connections > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MySQL uses more than 80 % of max_connections"
+          description: "{{ $value | humanizePercentage }} of the allowed connections are open."
+
+  - name: host
+    rules:
+      - alert: HostHighCpu
+        expr: travelagency:host_cpu_used:ratio5m > 0.85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The Ubuntu host uses more than 85 % CPU"
+          description: "CPU used: {{ $value | humanizePercentage }} for 10 minutes."
+
+      - alert: HostLowMemory
+        expr: travelagency:host_memory_used:ratio > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Less than 10 % of the memory of the host is free"
+          description: "Memory used: {{ $value | humanizePercentage }}. Containers may be killed (OOM)."
+
+      - alert: HostDiskAlmostFull
+        expr: travelagency:host_disk_used:ratio > 0.85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The root disk of the host is more than 85 % full"
+          description: "Disk used: {{ $value | humanizePercentage }}."
+
+      - alert: HostDiskFullIn24h
+        expr: predict_linear(node_filesystem_avail_bytes{job="node", mountpoint="/"}[6h], 24 * 3600) < 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "At the current rate the root disk is full within 24 hours"
+          description: "Clean up images (docker image prune), Nexus blob stores or Jenkins builds."

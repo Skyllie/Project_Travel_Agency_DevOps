@@ -1,0 +1,126 @@
+# Unit tests of the alert and recording rules, with made-up series:
+#   docker run --rm -v "$PWD/prometheus:/etc/prometheus:ro" --entrypoint promtool \
+#     prom/prometheus:v3.15.0 test rules /etc/prometheus/tests.yml
+
+rule_files:
+  - alerts.yml
+  - capacity.yml
+
+evaluation_interval: 15s
+# Compare numbers with a small tolerance (rates are floating point)
+fuzzy_compare: true
+
+tests:
+  # The site stops answering: SiteDown fires after 1 minute, not before
+  - interval: 15s
+    input_series:
+      - series: 'probe_success{job="blackbox-site", instance="http://travelagency-tf-lb/form-login"}'
+        values: "1 1 1 1 0 0 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 1m15s
+        alertname: SiteDown
+        exp_alerts: []
+      - eval_time: 2m30s
+        alertname: SiteDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: blackbox-site
+              instance: http://travelagency-tf-lb/form-login
+            exp_annotations:
+              summary: "The site does not answer through the load balancer"
+              description: "http://travelagency-tf-lb/form-login has failed every check for 1 minute."
+
+  # app2 is stopped: it leaves DNS, its series stop. AppServerGone fires for app2, not for app1
+  - interval: 15s
+    input_series:
+      - series: 'up{job="tomcat", instance="app1"}'
+        values: "1x30"
+      - series: 'up{job="tomcat", instance="app2"}'
+        values: "1x4 stale"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: AppServerGone
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: AppServerGone
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: tomcat
+              instance: app2
+            exp_annotations:
+              summary: "Application server app2 is gone"
+              description: "It was there in the last 30 minutes and is not found now (stopped, deleted or scaled down)."
+
+  # 10 % of the requests fail for 10 minutes: HighErrorRate
+  - interval: 1m
+    input_series:
+      - series: 'tomcat_requestcount_total{job="tomcat", instance="app1"}'
+        values: "0+600x15"
+      - series: 'tomcat_errorcount_total{job="tomcat", instance="app1"}'
+        values: "0+60x15"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: HighErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "More than 5 % of the requests end with an error"
+              description: "10% of the requests of the last 5 minutes failed."
+
+  # Capacity numbers, scraped every 15 s: 5 requests/s on each of two servers, 0.25 CPU core each,
+  # 80 ms per request -> 10 requests/s, 0.05 CPU s per request, 0.08 s response time
+  - interval: 15s
+    input_series:
+      - series: 'tomcat_requestcount_total{job="tomcat", instance="app1"}'
+        values: "0+75x45"
+      - series: 'tomcat_requestcount_total{job="tomcat", instance="app2"}'
+        values: "0+75x45"
+      - series: 'process_cpu_seconds_total{job="tomcat", instance="app1"}'
+        values: "0+3.75x45"
+      - series: 'process_cpu_seconds_total{job="tomcat", instance="app2"}'
+        values: "0+3.75x45"
+      - series: 'tomcat_processingtime_total{job="tomcat", instance="app1"}'
+        values: "0+6000x45"
+      - series: 'tomcat_processingtime_total{job="tomcat", instance="app2"}'
+        values: "0+6000x45"
+    promql_expr_test:
+      - expr: travelagency:requests:rate1m
+        eval_time: 10m
+        exp_samples:
+          - labels: "travelagency:requests:rate1m"
+            value: 10
+      - expr: travelagency:cpu_seconds_per_request:rate5m
+        eval_time: 10m
+        exp_samples:
+          - labels: "travelagency:cpu_seconds_per_request:rate5m"
+            value: 0.05
+      - expr: travelagency:response_time_seconds:avg5m
+        eval_time: 10m
+        exp_samples:
+          - labels: "travelagency:response_time_seconds:avg5m"
+            value: 0.08
+
+  # The heap of app2 stays above 90 %: JvmHeapAlmostFull for app2 only
+  - interval: 1m
+    input_series:
+      - series: 'jvm_memory_used_bytes{job="tomcat", instance="app1", area="heap"}'
+        values: "100x10"
+      - series: 'jvm_memory_max_bytes{job="tomcat", instance="app1", area="heap"}'
+        values: "400x10"
+      - series: 'jvm_memory_used_bytes{job="tomcat", instance="app2", area="heap"}'
+        values: "380x10"
+      - series: 'jvm_memory_max_bytes{job="tomcat", instance="app2", area="heap"}'
+        values: "400x10"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: JvmHeapAlmostFull
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: app2
+            exp_annotations:
+              summary: "app2: heap more than 90 % full"
+              description: "The JVM spends more and more time in garbage collection; raise -Xmx or add a server."
