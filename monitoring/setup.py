@@ -98,13 +98,19 @@ GRANT SELECT ON performance_schema.* TO 'exporter'@'{host}';
 
 
 def get_json(url):
+    """(HTTP status, parsed JSON or None). The status counts even when the answer is not JSON:
+    Prometheus answers /-/ready with plain text."""
     try:
         with OPENER.open(url, timeout=10) as resp:
-            return resp.status, json.loads(resp.read().decode("utf-8") or "null")
+            status, body = resp.status, resp.read().decode("utf-8")
     except urllib.error.HTTPError as err:
         return err.code, None
-    except (urllib.error.URLError, OSError, ValueError):
+    except (urllib.error.URLError, OSError):
         return 0, None
+    try:
+        return status, json.loads(body or "null")
+    except ValueError:
+        return status, None
 
 
 def wait_for(name, url, seconds=180):
