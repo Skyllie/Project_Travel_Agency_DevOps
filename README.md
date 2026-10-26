@@ -14,8 +14,12 @@ This repository is a DevOps project built around the application. Each deploymen
 | `docker-load-balancer` | Three application servers behind an Nginx load balancer; switchable algorithms, sticky sessions, failover |
 | `terraform` | The load-balanced stack as code: Terraform with the Docker provider |
 | `jenkins` | CI/CD: a Jenkins pipeline builds, tests and deploys every commit with Terraform |
+| `artifact-management` | Nexus Repository: every build stores its WAR and image there, the servers run the image from Nexus, rollback to any stored version |
+| `security-scanning` | Snyk scans the dependencies, Trivy and Grype the image; a security gate stops builds with fixable critical vulnerabilities; SBOM in Nexus |
+| `code-inspection` | SonarQube analyses the code and the unit tests (JUnit 5, JaCoCo) on every build; the build waits for the quality gate |
+| `monitoring` | Prometheus and Grafana: host, containers, Tomcat, MySQL, Nginx and the CI tools; alerts; load test and capacity estimate |
 
-Each branch starts from the previous one: `main` → `docker` → `docker-load-balancer` → `terraform` → `jenkins`.
+Each branch starts from the previous one: `main` → `docker` → `docker-load-balancer` → `terraform` → `jenkins` → `artifact-management` → `security-scanning` → `code-inspection` → `monitoring`.
 
 ## Application Settings
 
