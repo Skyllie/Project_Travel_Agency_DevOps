@@ -32,6 +32,7 @@ SonarQube Community Build + PostgreSQL  (containers, http://<Ubuntu IP>:9000)
 | `Jenkinsfile` | New stage Code inspection: SonarQube; test results on the build page |
 | `pom.xml` | JUnit 5, Mockito, Surefire, JaCoCo; SonarQube project key |
 | `src/test/java/…` | First unit tests: `CountryServiceImpl`, `BookingServiceImpl`, `StringToLocalDateConverter` |
+| `src/test/resources/mockito-extensions/…` | Mockito makes mocks as subclasses, without attaching an agent to the JVM |
 | `jenkins/casc.yaml`, `jenkins/plugins.txt` | Credential `sonar-token`; plugin JUnit |
 
 ## What SonarQube Checks
@@ -137,6 +138,7 @@ The build stops at Code inspection; nothing is scanned, published or deployed. T
 - **Analysis in the pipeline, gate in the pipeline.** Maven runs `verify` (tests and coverage) and the SonarQube scanner in one call; `sonar.qualitygate.wait=true` makes the scanner wait until SonarQube has processed the analysis and fail when the gate fails. No webhook or extra Jenkins plugin is needed.
 - **Order of the stages.** Code inspection comes right after the build: code that does not pass the gate is not scanned, published or deployed.
 - **Tests run twice, for two reasons.** Inside the Docker build (a failing test stops the image) and in Code inspection (coverage for SonarQube). The Docker build stays independent of Jenkins.
+- **Mocks without an agent.** Mockito makes the mocks as subclasses (`src/test/resources/mockito-extensions/org.mockito.plugins.MockMaker`). Its default inline mock maker has to attach an agent to the running JVM, and in the Docker build it could not start (`Could not initialize plugin: interface org.mockito.plugins.MockMaker`, build #11). The mocked DAOs are interfaces, so subclasses are enough.
 - **SonarQube as code.** `docker-compose.yml` fixes the versions; `setup.py` sets the admin password, requires a login for everything, creates the project as private and makes a token of type "project analysis": it can only send analyses of `travelagency`, nothing else.
 - **Secrets.** The token is the Jenkins credential `sonar-token`, passed to the scanner as the environment variable `SONAR_TOKEN` (not on the command line), masked in the log. The database and admin passwords stay in `sonarqube/.env`.
 - **Memory.** The heaps of the three SonarQube processes are limited in `docker-compose.yml` (512 MB each).
@@ -164,5 +166,6 @@ The build stops at Code inspection; nothing is scanned, published or deployed. T
 | `setup.py`: `must have at least 12 characters…` | SonarQube's password rule: make the password stronger |
 | Code inspection: `Not authorized` / `401` | `SONAR_TOKEN` in `jenkins/.env` is wrong or revoked: `python3 setup.py --new-token`, update `.env`, `docker compose up -d` in `jenkins/` |
 | Code inspection: `Connection refused` to `host.docker.internal:9000` | SonarQube is down: `docker compose ps` in `sonarqube/` |
+| Tests: `Could not initialize plugin: interface org.mockito.plugins.MockMaker` | The file `src/test/resources/mockito-extensions/org.mockito.plugins.MockMaker` (`mock-maker-subclass`) is missing |
 | `QUALITY GATE STATUS: FAILED` | Section 5 |
 | `Timeout` waiting for the quality gate | SonarQube is slow (memory); run the build again |
