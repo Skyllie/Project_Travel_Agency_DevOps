@@ -17,7 +17,8 @@ public class CustomAccessDeniedException implements AccessDeniedHandler {
         RequestDispatcher requestDispatcher = request.getRequestDispatcher("/WEB-INF/views/error.jsp");
         response.setStatus(HttpServletResponse.SC_FORBIDDEN);
         request.setAttribute("code", "403 / Forbidden");
-        request.setAttribute("message", ade.getMessage());
+        // A fixed text: the message of the exception comes in the language of the browser
+        request.setAttribute("message", "Access is denied");
         requestDispatcher.forward(request, response);
 
     }
