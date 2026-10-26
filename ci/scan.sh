@@ -60,7 +60,12 @@ trivy_scan() {
 grype_scan() {
     need IMAGE
     mkdir -p "$REPORTS"
-    grype "docker:$IMAGE" --quiet -o "json=$REPORTS/grype.json" -o "table=$REPORTS/grype.txt"
+    # The Anchore database, cached in the Jenkins home. A separate step, so a failed download
+    # (network, full disk) is reported as such
+    grype db update
+    # No --quiet: in Grype it hides the errors as well. Without a terminal Grype prints only
+    # warnings and errors anyway
+    GRYPE_DB_AUTO_UPDATE=false grype "docker:$IMAGE" -o "json=$REPORTS/grype.json" -o "table=$REPORTS/grype.txt"
     # The table only with High and Critical, like the Trivy one
     grep -E 'NAME|High|Critical' "$REPORTS/grype.txt" || echo "Grype: no High or Critical vulnerabilities"
 }
