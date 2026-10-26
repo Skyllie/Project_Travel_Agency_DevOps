@@ -17,7 +17,7 @@
 <h3>Surname: ${user.surname}</h3>
 <h3>Email: ${user.email}</h3>
 <hr>
-<button onclick="window.location.href='/user';">Повернутися назад</button>
+<button onclick="window.location.href='/user';">Back</button>
 
 </body>
 </html>
